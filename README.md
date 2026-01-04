@@ -67,6 +67,11 @@ If the requirements do not exist yet, please install them first
  pip install tensorflow
  pip install matplotlib
  pip install tensorflow-cpu
+ sudo apt install cloud-init
+ pip install python-multipart
+ pip install fastapi uvicorn
+
+
  ```
  # pag mag freeze kag library
  ```

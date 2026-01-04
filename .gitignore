@@ -1,0 +1,14 @@
+# Python virtual environments
+env/
+venv/
+env_lib-env/
+
+# Compiled Python files
+__pycache__/
+*.pyc
+
+# Large model/data files
+*.h5
+*.ckpt
+*.pt
+*.pkl

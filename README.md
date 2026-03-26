@@ -64,7 +64,8 @@ If the requirements do not exist yet, please install them first
  
 ```
  pip install --upgrade pip
- pip install tensorflow
+ pip install tensorflow # for ubuntu 24 effective
+ pip install tflite-runtime # for pios effective
  pip install matplotlib
  pip install tensorflow-cpu
  sudo apt install cloud-init

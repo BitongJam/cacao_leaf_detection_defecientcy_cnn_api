@@ -63,6 +63,8 @@ NumPy               1.26+                                   Optimized for ML wor
 If the requirements do not exist yet, please install them first
  
 ```
+for ubuntu 24 lts
+===================
  pip install --upgrade pip
  pip install tensorflow # for ubuntu 24 effective
  pip install tflite-runtime # for pios effective
@@ -73,6 +75,39 @@ If the requirements do not exist yet, please install them first
  pip install fastapi uvicorn
 
 
+ ```
+ ```
+ For raspberry Pi Os (legacy,64-bit) full
+ ========================================
+ #!/bin/bash
+
+# ----------------------------------------
+# Setup script for cacao_project
+# Compatible with Python 3.11 and TensorFlow 2.12
+# ----------------------------------------
+
+# 1. Create virtual environment
+python3 -m venv env_lib-env
+
+# 2. Activate virtual environment
+source env_lib-env/bin/activate
+
+# 3. Upgrade pip
+pip install --upgrade pip
+
+# 4. Install compatible packages
+pip install tensorflow==2.21.0 keras==3.13.2 numpy==2.4.3 pillow==12.1.1 fastapi uvicorn
+
+# 5. Confirm installation versions
+echo "Installed versions:"
+python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
+python -c "import keras; print('Keras:', keras.__version__)"
+python -c "import numpy as np; print('NumPy:', np.__version__)"
+python -c "import PIL; print('Pillow:', PIL.__version__)"
+python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
+python -c "import uvicorn; print('Uvicorn:', uvicorn.__version__)"
+
+echo "Setup complete! Your environment is ready."
  ```
  # pag mag freeze kag library
  ```

@@ -12,3 +12,4 @@ __pycache__/
 *.ckpt
 *.pt
 *.pkl
+*Zone.Identifier

@@ -8,6 +8,7 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from datetime import datetime
+from pathlib import Path
 
 app = FastAPI()
 
@@ -27,7 +28,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 3. Load Model
 # Siguroha nga ang '1.keras' kay Functional model na
-MODEL_PATH = "/home/pi/Documents/cacao_project/models/1.keras"
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODEL_PATH = BASE_DIR / "models" / "1.keras"
 MODEL = tf.keras.models.load_model(MODEL_PATH)
 CLASS_NAMES = ["Early Blight", "Late Blight", "Healthy"]
 

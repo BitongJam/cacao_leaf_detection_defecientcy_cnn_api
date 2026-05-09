@@ -29,9 +29,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # 3. Load Model
 # Siguroha nga ang '1.keras' kay Functional model na
 BASE_DIR = Path(__file__).resolve().parent.parent
-MODEL_PATH = BASE_DIR / "models" / "1.keras"
+MODEL_PATH = BASE_DIR / "models" / "final_model.keras"
 MODEL = tf.keras.models.load_model(MODEL_PATH)
-CLASS_NAMES = ["Early Blight", "Late Blight", "Healthy"]
+CLASS_NAMES = ["k", "n", "p","healty","not_cacao"]
 
 print("✅ Model loaded successfully. Ready for predictions.")
 
@@ -42,8 +42,8 @@ async def predict(file: UploadFile = File(...)):
         file_bytes = await file.read()
         image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
         
-        # Resize image para sa model (256x256)
-        img_resized = image.resize((256, 256))
+        # Resize image para sa model (224x224)
+        img_resized = image.resize((224, 224))
         img_array = np.array(img_resized).astype("float32")
         
         # E-expand ang dimensions (1, 256, 256, 3) ug himoong Tensor

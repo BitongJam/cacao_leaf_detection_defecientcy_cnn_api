@@ -139,7 +139,7 @@ async def predict(file: UploadFile = File(...)):
 
 
 @app.post("/predict-2")
-async def predict(file: UploadFile = File(...)):
+async def predict2(file: UploadFile = File(...)):
     try:
         # --- A. PREPROCESSING ---
         file_bytes = await file.read()

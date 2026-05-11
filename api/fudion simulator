@@ -1,0 +1,579 @@
+import io
+import os
+import cv2
+import json
+import base64
+import random
+import asyncio
+import numpy as np
+import tensorflow as tf
+
+from PIL import Image
+from pathlib import Path
+from datetime import datetime
+from contextlib import asynccontextmanager
+
+from fastapi import (
+    FastAPI,
+    File,
+    UploadFile,
+    WebSocket
+)
+
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+# =========================================================
+# FASTAPI
+# =========================================================
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =========================================================
+# OUTPUT DIRECTORY
+# =========================================================
+OUTPUT_DIR = "detected_heatmaps"
+
+os.makedirs(
+    OUTPUT_DIR,
+    exist_ok=True
+)
+
+# =========================================================
+# LOAD CNN MODEL
+# =========================================================
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+MODEL_PATH = BASE_DIR / "models" / "final_model.keras"
+
+MODEL = tf.keras.models.load_model(MODEL_PATH)
+
+CLASS_NAMES = [
+    "k",
+    "n",
+    "p",
+    "healthy",
+    "not_cacao"
+]
+
+print("✅ CNN MODEL LOADED")
+
+# =========================================================
+# HYBRID FUSION WEIGHTS
+# =========================================================
+ALPHA = 0.7
+BETA = 0.3
+
+# =========================================================
+# WEBSOCKET CLIENTS
+# =========================================================
+clients: set[WebSocket] = set()
+
+# =========================================================
+# LIVE SENSOR DATA
+# =========================================================
+latest_sensor = {
+    "n": 70,
+    "p": 70,
+    "k": 70,
+    "status": "healthy",
+    "time": ""
+}
+
+# =========================================================
+# SENSOR SIMULATOR
+# =========================================================
+current_n = 70
+current_p = 70
+current_k = 70
+
+def read_npk_simulated():
+
+    global current_n
+    global current_p
+    global current_k
+
+    mode = random.choice([
+        "healthy",
+        "low_n",
+        "low_p",
+        "low_k"
+    ])
+
+    # -----------------------------------------
+    # HEALTHY
+    # -----------------------------------------
+    if mode == "healthy":
+
+        current_n += random.randint(-3, 3)
+        current_p += random.randint(-3, 3)
+        current_k += random.randint(-3, 3)
+
+        status = "Healthy"
+
+    # -----------------------------------------
+    # LOW NITROGEN
+    # -----------------------------------------
+    elif mode == "low_n":
+
+        current_n = random.randint(5, 20)
+        current_p = random.randint(60, 90)
+        current_k = random.randint(60, 90)
+
+        status = "Nitrogen Deficient"
+
+    # -----------------------------------------
+    # LOW PHOSPHORUS
+    # -----------------------------------------
+    elif mode == "low_p":
+
+        current_n = random.randint(60, 90)
+        current_p = random.randint(5, 20)
+        current_k = random.randint(60, 90)
+
+        status = "Phosphorus Deficient"
+
+    # -----------------------------------------
+    # LOW POTASSIUM
+    # -----------------------------------------
+    elif mode == "low_k":
+
+        current_n = random.randint(60, 90)
+        current_p = random.randint(60, 90)
+        current_k = random.randint(5, 20)
+
+        status = "Potassium Deficient"
+
+    current_n = max(0, min(100, current_n))
+    current_p = max(0, min(100, current_p))
+    current_k = max(0, min(100, current_k))
+
+    return {
+        "n": current_n,
+        "p": current_p,
+        "k": current_k,
+        "status": status,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+# =========================================================
+# BROADCAST SENSOR
+# =========================================================
+async def broadcast(data: dict):
+
+    disconnected = []
+
+    for ws in clients:
+
+        try:
+            await ws.send_json(data)
+
+        except:
+            disconnected.append(ws)
+
+    for ws in disconnected:
+        clients.discard(ws)
+
+# =========================================================
+# LIVE SENSOR LOOP
+# =========================================================
+async def sensor_loop():
+
+    global latest_sensor
+
+    while True:
+
+        latest_sensor = read_npk_simulated()
+
+        print("\n==============================")
+        print("🌱 LIVE SENSOR UPDATE")
+        print("==============================")
+        print(latest_sensor)
+
+        await broadcast(latest_sensor)
+
+        await asyncio.sleep(2)
+
+# =========================================================
+# LIFESPAN
+# =========================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    task = asyncio.create_task(sensor_loop())
+
+    yield
+
+    task.cancel()
+
+app.router.lifespan_context = lifespan
+
+# =========================================================
+# ROOT
+# =========================================================
+@app.get("/")
+def root():
+
+    return {
+        "message": "HYBRID CNN + SENSOR SYSTEM RUNNING"
+    }
+
+# =========================================================
+# SENSOR API
+# =========================================================
+@app.get("/sensor")
+def get_sensor():
+
+    return latest_sensor
+
+# =========================================================
+# SENSOR STREAM
+# =========================================================
+@app.get("/sensor-stream")
+async def sensor_stream():
+
+    async def event_generator():
+
+        while True:
+
+            yield f"data: {json.dumps(latest_sensor)}\n\n"
+
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"
+    )
+
+# =========================================================
+# WEBSOCKET
+# =========================================================
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+
+    await websocket.accept()
+
+    clients.add(websocket)
+
+    print("✅ CLIENT CONNECTED")
+
+    try:
+
+        while True:
+            await asyncio.sleep(1)
+
+    except:
+        pass
+
+    finally:
+
+        clients.discard(websocket)
+
+        print("❌ CLIENT DISCONNECTED")
+
+# =========================================================
+# CNN + HYBRID FUSION
+# =========================================================
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+
+    try:
+
+        # =================================================
+        # READ IMAGE
+        # =================================================
+        file_bytes = await file.read()
+
+        image = Image.open(
+            io.BytesIO(file_bytes)
+        ).convert("RGB")
+
+        # =================================================
+        # PREPROCESS IMAGE
+        # =================================================
+        img_resized = image.resize((224, 224))
+
+        img_array = np.array(
+            img_resized
+        ).astype("float32")
+
+        img_array = img_array / 255.0
+
+        img_batch = tf.expand_dims(
+            img_array,
+            0
+        )
+
+        # =================================================
+        # SENSOR VALUES
+        # =================================================
+        n = latest_sensor["n"]
+        p = latest_sensor["p"]
+        k = latest_sensor["k"]
+
+        print("\n========== SENSOR VALUES ==========")
+        print("N:", n)
+        print("P:", p)
+        print("K:", k)
+
+        # =================================================
+        # GRAD-CAM LAYER
+        # =================================================
+        try:
+
+            target_layer = MODEL.get_layer(
+                "last_conv_layer"
+            )
+
+        except:
+
+            target_layer = MODEL.layers[-3]
+
+        # =================================================
+        # CREATE GRAD MODEL
+        # =================================================
+        grad_model = tf.keras.models.Model(
+            inputs=MODEL.inputs,
+            outputs=[
+                target_layer.output,
+                MODEL.output
+            ]
+        )
+
+        # =================================================
+        # CNN PREDICTION
+        # =================================================
+        with tf.GradientTape() as tape:
+
+            conv_outputs, predictions = grad_model(
+                img_batch
+            )
+
+            predicted_idx = tf.argmax(
+                predictions[0]
+            )
+
+            loss = predictions[:, predicted_idx]
+
+        # =================================================
+        # CNN PROBABILITIES
+        # =================================================
+        cnn_probs = tf.nn.softmax(
+            predictions[0]
+        ).numpy()
+
+        print("\n========== CNN PROBS ==========")
+        print(cnn_probs)
+
+        # =================================================
+        # SENSOR PROBABILITIES
+        # =================================================
+        sensor_values = np.array([
+            k / 100,
+            n / 100,
+            p / 100,
+            0.5,
+            0.2
+        ])
+
+        sensor_probs = sensor_values / (
+            np.sum(sensor_values) + 1e-10
+        )
+
+        print("\n========== SENSOR PROBS ==========")
+        print(sensor_probs)
+
+        # =================================================
+        # HYBRID FUSION
+        # =================================================
+        final_probs = (
+            ALPHA * cnn_probs
+        ) + (
+            BETA * sensor_probs
+        )
+
+        final_idx = np.argmax(
+            final_probs
+        )
+
+        final_class = CLASS_NAMES[
+            final_idx
+        ]
+
+        confidence = float(
+            final_probs[final_idx]
+        )
+
+        print("\n========== FINAL RESULT ==========")
+        print("FINAL CLASS:", final_class)
+        print("CONFIDENCE:", confidence)
+
+        # =================================================
+        # GRAD-CAM
+        # =================================================
+        grads = tape.gradient(
+            loss,
+            conv_outputs
+        )
+
+        pooled_grads = tf.reduce_mean(
+            grads,
+            axis=(0, 1, 2)
+        )
+
+        conv_outputs = conv_outputs[0]
+
+        heatmap = conv_outputs @ tf.expand_dims(
+            pooled_grads,
+            -1
+        )
+
+        heatmap = tf.squeeze(heatmap)
+
+        heatmap = tf.maximum(
+            heatmap,
+            0
+        ) / (
+            tf.reduce_max(heatmap) + 1e-10
+        )
+
+        heatmap_np = heatmap.numpy()
+
+        # =================================================
+        # OVERLAY HEATMAP
+        # =================================================
+        img_np = np.array(image)
+
+        heatmap_resized = cv2.resize(
+            heatmap_np,
+            (
+                img_np.shape[1],
+                img_np.shape[0]
+            )
+        )
+
+        heatmap_color = np.uint8(
+            255 * heatmap_resized
+        )
+
+        heatmap_color = cv2.applyColorMap(
+            np.ascontiguousarray(
+                heatmap_color
+            ),
+            cv2.COLORMAP_JET
+        )
+
+        heatmap_rgb = cv2.cvtColor(
+            heatmap_color,
+            cv2.COLOR_BGR2RGB
+        )
+
+        superimposed_img = cv2.addWeighted(
+            img_np,
+            0.6,
+            heatmap_rgb,
+            0.4,
+            0
+        )
+
+        # =================================================
+        # SAVE IMAGE
+        # =================================================
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        filename = f"{timestamp}_{final_class}.jpg"
+
+        save_path = os.path.join(
+            OUTPUT_DIR,
+            filename
+        )
+
+        final_bgr = cv2.cvtColor(
+            superimposed_img,
+            cv2.COLOR_RGB2BGR
+        )
+
+        cv2.imwrite(
+            save_path,
+            final_bgr
+        )
+
+        # =================================================
+        # BASE64
+        # =================================================
+        _, buffer = cv2.imencode(
+            ".jpg",
+            final_bgr
+        )
+
+        heatmap_base64 = base64.b64encode(
+            buffer.tobytes()
+        ).decode("utf-8")
+
+        # =================================================
+        # RESPONSE
+        # =================================================
+        return {
+
+            "success": True,
+
+            "final_class":
+                final_class,
+
+            "confidence":
+                confidence,
+
+            "cnn_prediction":
+                CLASS_NAMES[
+                    int(np.argmax(cnn_probs))
+                ],
+
+            "sensor_data":
+                latest_sensor,
+
+            "cnn_probs":
+                cnn_probs.tolist(),
+
+            "sensor_probs":
+                sensor_probs.tolist(),
+
+            "final_probs":
+                final_probs.tolist(),
+
+            "local_path":
+                save_path,
+
+            "heatmap_base64":
+                heatmap_base64
+        }
+
+    except Exception as e:
+
+        print("❌ ERROR:", str(e))
+
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# =========================================================
+# RUN SERVER
+# =========================================================
+if __name__ == "__main__":
+
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=3000
+    )

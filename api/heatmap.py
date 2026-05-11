@@ -268,7 +268,7 @@ async def multi_predict(files: list[UploadFile] = File(...)):
 
     for file in files:
         result = await predict(file)
-
+        print("results:", results)
         cls = result["class"]
         conf = result["confidence"]
 

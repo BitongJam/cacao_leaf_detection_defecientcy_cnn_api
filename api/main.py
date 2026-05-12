@@ -396,6 +396,130 @@ async def predict(files: list[UploadFile] = File(...)):
             predictions.append(cls)
             confidences.append(conf)
 
+
+         # =================================================
+        # GRAD-CAM
+        # =================================================
+
+        target_layer = MODEL.get_layer(
+            "last_conv_layer"
+        )
+
+        grad_model = tf.keras.models.Model(
+            [MODEL.inputs],
+            [
+                target_layer.output,
+                MODEL.output
+            ]
+        )
+
+        with tf.GradientTape() as tape:
+
+            conv_outputs, preds = grad_model(
+                img_batch
+            )
+
+            loss = preds[:, idx]
+
+        grads = tape.gradient(
+            loss,
+            conv_outputs
+        )
+
+        pooled_grads = tf.reduce_mean(
+            grads,
+            axis=(0, 1, 2)
+        )
+
+        conv_outputs = conv_outputs[0]
+
+        heatmap = conv_outputs @ tf.expand_dims(
+            pooled_grads,
+            -1
+        )
+
+        heatmap = tf.squeeze(heatmap)
+
+        heatmap = tf.maximum(
+            heatmap,
+            0
+        ) / (
+            tf.math.reduce_max(heatmap) + 1e-10
+        )
+
+        heatmap_np = heatmap.numpy()
+
+        # =================================================
+        # OVERLAY
+        # =================================================
+
+        img_np = np.array(image)
+
+        heatmap_resized = cv2.resize(
+            heatmap_np,
+            (
+                img_np.shape[1],
+                img_np.shape[0]
+            )
+        )
+
+        heatmap_color = np.uint8(
+            255 * heatmap_resized
+        )
+
+        heatmap_color = cv2.applyColorMap(
+            np.ascontiguousarray(heatmap_color),
+            cv2.COLORMAP_JET
+        )
+
+        heatmap_color_rgb = cv2.cvtColor(
+            heatmap_color,
+            cv2.COLOR_BGR2RGB
+        )
+
+        superimposed_img = cv2.addWeighted(
+            img_np,
+            0.6,
+            heatmap_color_rgb,
+            0.4,
+            0
+        )
+
+        # =================================================
+        # SAVE IMAGE
+        # =================================================
+
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        filename = f"{timestamp}_{cls}.jpg"
+
+        save_path = os.path.join(
+            OUTPUT_DIR,
+            filename
+        )
+
+        final_bgr = cv2.cvtColor(
+            superimposed_img,
+            cv2.COLOR_RGB2BGR
+        )
+
+        cv2.imwrite(save_path, final_bgr)
+
+        # =================================================
+        # BASE64
+        # =================================================
+
+        _, buffer = cv2.imencode(
+            '.jpg',
+            final_bgr
+        )
+
+        heatmap_base64 = base64.b64encode(
+            buffer.tobytes()
+        ).decode('utf-8')
+
         # =================================================
         # MAJORITY VOTE
         # =================================================

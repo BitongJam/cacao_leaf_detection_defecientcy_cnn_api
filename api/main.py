@@ -307,30 +307,30 @@ def evaluate_sensor_support(predicted_class, sensor):
 
     if predicted_class == "n":
         if n < 20:
-            score = 0.95
-        elif n < 40:
             score = 0.75
-        else:
+        elif n > 40:
             score = 0.30
+        else:
+            score = 0.95
 
     elif predicted_class == "p":
-        if p < 20:
-            score = 0.95
-        elif p < 40:
+        if p < 10:
             score = 0.75
-        else:
+        elif p > 20:
             score = 0.30
+        else:
+            score = 0.95
 
     elif predicted_class == "k":
         if k < 20:
-            score = 0.95
-        elif k < 40:
             score = 0.75
-        else:
+        elif k > 40:
             score = 0.30
+        else:
+            score = 0.95
 
     elif predicted_class == "healthy":
-        if n > 40 and p > 40 and k > 40:
+        if n >= 10 and n <= 25 and p >= 10 and p <= 20 and k >= 20 and k <= 40:
             score = 0.95
         else:
             score = 0.40

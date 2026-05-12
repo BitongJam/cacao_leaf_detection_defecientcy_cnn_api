@@ -12,12 +12,12 @@ import tensorflow as tf
 from PIL import Image
 from pathlib import Path
 from datetime import datetime
-from collections import Counter
+from collections import defaultdict, Counter
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 # =========================================================
@@ -58,17 +58,11 @@ print("✅ CNN MODEL LOADED")
 # SERIAL SENSOR
 # =========================================================
 
-try:
-    ser = serial.Serial(
-        '/dev/serial0',
-        baudrate=9600,
-        timeout=1
-    )
-    print("✅ SERIAL CONNECTED")
-
-except Exception as e:
-    print("❌ SERIAL ERROR:", e)
-    ser = None
+ser = serial.Serial(
+    '/dev/serial0',
+    baudrate=9600,
+    timeout=1
+)
 
 npk_query = bytearray([
     0x01, 0x03, 0x00, 0x1e,
@@ -87,12 +81,7 @@ class NPKData(BaseModel):
     k: int
     time: str
 
-latest_sensor_data = NPKData(
-    n=0,
-    p=0,
-    k=0,
-    time=""
-)
+latest_sensor_data = NPKData(n=0, p=0, k=0, time="")
 
 # =========================================================
 # THRESHOLDS
@@ -108,61 +97,40 @@ LOW_K, HIGH_K = 20, 40
 
 def check_npk_status(sensor):
 
-    n = sensor["n"]
-    p = sensor["p"]
-    k = sensor["k"]
+    n, p, k = sensor["n"], sensor["p"], sensor["k"]
 
     notifications = []
     recommendations = []
 
-    # =========================
-    # NITROGEN
-    # =========================
-
+    # N
     if n < LOW_N:
         notifications.append("LOW NITROGEN")
         recommendations.append("Apply Nitrogen fertilizer")
-
     elif n > HIGH_N:
         notifications.append("HIGH NITROGEN")
         recommendations.append("Reduce Nitrogen fertilizer")
-
     else:
         notifications.append("NORMAL NITROGEN")
 
-    # =========================
-    # PHOSPHORUS
-    # =========================
-
+    # P
     if p < LOW_P:
         notifications.append("LOW PHOSPHORUS")
         recommendations.append("Apply Phosphorus fertilizer")
-
     elif p > HIGH_P:
         notifications.append("HIGH PHOSPHORUS")
         recommendations.append("Reduce Phosphorus fertilizer")
-
     else:
         notifications.append("NORMAL PHOSPHORUS")
 
-    # =========================
-    # POTASSIUM
-    # =========================
-
+    # K
     if k < LOW_K:
         notifications.append("LOW POTASSIUM")
         recommendations.append("Apply Potassium fertilizer")
-
     elif k > HIGH_K:
         notifications.append("HIGH POTASSIUM")
         recommendations.append("Reduce Potassium fertilizer")
-
     else:
         notifications.append("NORMAL POTASSIUM")
-
-    # =========================
-    # SOIL STATUS
-    # =========================
 
     if (
         LOW_N <= n <= HIGH_N and
@@ -170,7 +138,6 @@ def check_npk_status(sensor):
         LOW_K <= k <= HIGH_K
     ):
         soil_status = "SOIL HEALTHY"
-
     else:
         soil_status = "SOIL NEEDS ATTENTION"
 
@@ -186,13 +153,8 @@ def check_npk_status(sensor):
 
 def read_npk_sensor():
 
-    if ser is None:
-        return None
-
     try:
-
         ser.write(npk_query)
-
         time.sleep(0.15)
 
         response = ser.read(11)
@@ -211,8 +173,7 @@ def read_npk_sensor():
             }
 
     except Exception as e:
-
-        print("❌ SENSOR ERROR:", e)
+        print("SENSOR ERROR:", e)
 
     return None
 
@@ -229,13 +190,12 @@ async def sensor_loop():
         data = read_npk_sensor()
 
         if data:
-
             latest_sensor_data = NPKData(**data)
 
             result = check_npk_status(data)
 
             payload = {
-                "sensor_data": latest_sensor_data.model_dump(),
+                "sensor_data": latest_sensor_data.dict(),
                 "notifications": result["notifications"],
                 "recommendations": result["recommendations"],
                 "soil_status": result["soil_status"]
@@ -253,11 +213,9 @@ async def broadcast(data):
 
     disconnected = []
 
-    for ws in list(clients):
-
+    for ws in clients:
         try:
             await ws.send_json(data)
-
         except:
             disconnected.append(ws)
 
@@ -286,12 +244,10 @@ app.router.lifespan_context = lifespan
 @app.get("/sensor")
 def get_sensor():
 
-    result = check_npk_status(
-        latest_sensor_data.model_dump()
-    )
+    result = check_npk_status(latest_sensor_data.dict())
 
     return {
-        "sensor_data": latest_sensor_data.model_dump(),
+        "sensor_data": latest_sensor_data.dict(),
         "notifications": result["notifications"],
         "recommendations": result["recommendations"],
         "soil_status": result["soil_status"]
@@ -308,12 +264,10 @@ async def sensor_stream():
 
         while True:
 
-            result = check_npk_status(
-                latest_sensor_data.model_dump()
-            )
+            result = check_npk_status(latest_sensor_data.dict())
 
             payload = {
-                "sensor_data": latest_sensor_data.model_dump(),
+                "sensor_data": latest_sensor_data.dict(),
                 "notifications": result["notifications"],
                 "recommendations": result["recommendations"],
                 "soil_status": result["soil_status"]
@@ -323,10 +277,7 @@ async def sensor_stream():
 
             await asyncio.sleep(2)
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream"
-    )
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 # =========================================================
 # WEBSOCKET
@@ -336,14 +287,11 @@ async def sensor_stream():
 async def websocket_endpoint(websocket: WebSocket):
 
     await websocket.accept()
-
     clients.add(websocket)
 
     try:
-
         while True:
             await asyncio.sleep(1)
-
     finally:
         clients.discard(websocket)
 
@@ -353,54 +301,37 @@ async def websocket_endpoint(websocket: WebSocket):
 
 def evaluate_sensor_support(predicted_class, sensor):
 
-    n = sensor["n"]
-    p = sensor["p"]
-    k = sensor["k"]
+    n, p, k = sensor["n"], sensor["p"], sensor["k"]
 
     score = 0.5
 
     if predicted_class == "n":
-
         if n < 20:
             score = 0.75
-
         elif n > 40:
             score = 0.30
-
         else:
             score = 0.95
 
     elif predicted_class == "p":
-
         if p < 10:
             score = 0.75
-
         elif p > 20:
             score = 0.30
-
         else:
             score = 0.95
 
     elif predicted_class == "k":
-
         if k < 20:
             score = 0.75
-
         elif k > 40:
             score = 0.30
-
         else:
             score = 0.95
 
     elif predicted_class == "healthy":
-
-        if (
-            10 <= n <= 25 and
-            10 <= p <= 20 and
-            20 <= k <= 40
-        ):
+        if n >= 10 and n <= 25 and p >= 10 and p <= 20 and k >= 20 and k <= 40:
             score = 0.95
-
         else:
             score = 0.40
 
@@ -412,23 +343,14 @@ def evaluate_sensor_support(predicted_class, sensor):
 
 def hybrid_fusion(cnn_class, cnn_confidence, sensor_data):
 
-    sensor_support = evaluate_sensor_support(
-        cnn_class,
-        sensor_data
-    )
+    sensor_support = evaluate_sensor_support(cnn_class, sensor_data)
 
-    final_confidence = (
-        cnn_confidence * 0.7
-    ) + (
-        sensor_support * 0.3
-    )
+    final_confidence = (cnn_confidence * 0.7) + (sensor_support * 0.3)
 
     if final_confidence >= 0.85:
         status = "STRONG DETECTION"
-
     elif final_confidence >= 0.60:
         status = "MODERATE DETECTION"
-
     else:
         status = "WEAK DETECTION"
 
@@ -440,24 +362,7 @@ def hybrid_fusion(cnn_class, cnn_confidence, sensor_data):
     }
 
 # =========================================================
-# FIND LAST CONV LAYER
-# =========================================================
-
-def get_last_conv_layer(model):
-
-    for layer in reversed(model.layers):
-
-        try:
-            if len(layer.output_shape) == 4:
-                return layer
-
-        except:
-            continue
-
-    raise ValueError("No Conv Layer Found")
-
-# =========================================================
-# PREDICT
+# MULTI-IMAGE PREDICT (MAIN ONLY)
 # =========================================================
 
 @app.post("/predict")
@@ -465,219 +370,108 @@ async def predict(files: list[UploadFile] = File(...)):
 
     try:
 
-        all_predictions = []
+        predictions = []
         confidences = []
-        results = []
+
+        # =================================================
+        # LOOP IMAGES
+        # =================================================
 
         for file in files:
 
-            # =========================
-            # READ IMAGE
-            # =========================
-
             img_bytes = await file.read()
 
-            image = Image.open(
-                io.BytesIO(img_bytes)
-            ).convert("RGB")
-
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             image = image.resize((224, 224))
 
-            img_array = (
-                np.array(image).astype("float32")
-            ) / 255.0
+            img_array = np.array(image).astype("float32")
+            img_batch = tf.expand_dims(img_array, 0)
 
-            img_batch = tf.expand_dims(
-                img_array,
-                0
-            )
-
-            # =========================
-            # GRAD MODEL
-            # =========================
-
-            target_layer = get_last_conv_layer(MODEL)
-
-            grad_model = tf.keras.Model(
+            # ===========================================
+            try:
+                target_layer = MODEL.get_layer("last_conv_layer")
+            except:
+                target_layer = MODEL.layers[-3]  # fallback safe
+            # ===========================================                               
+            gra_model = tf.keras.Model(
                 inputs=MODEL.inputs,
-                outputs=[
-                    target_layer.output,
-                    MODEL.output
-                ]
+                outputs=[target_layer.output, MODEL.output]
             )
-
-            # =========================
-            # GRADCAM
-            # =========================
-
+            
             with tf.GradientTape() as tape:
-
-                conv_outputs, preds = grad_model(
-                    img_batch
-                )
-
-                predicted_idx = tf.argmax(
-                    preds[0]
-                )
-
-                loss = preds[:, predicted_idx]
-
-            grads = tape.gradient(
-                loss,
-                conv_outputs
-            )
-
-            pooled_grads = tf.reduce_mean(
-                grads,
-                axis=(0, 1, 2)
-            )
-
+                conv_outputs, predictions = gra_model(img_batch)
+                predected_idx = tf.argmax(predictions[0])
+                loss = predictions[:, predected_idx]
+            grads = tape.gradient(loss, conv_outputs)
+            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+            
             conv_outputs = conv_outputs[0]
-
-            heatmap = conv_outputs @ tf.expand_dims(
-                pooled_grads,
-                -1
-            )
-
+            heatmap = conv_outputs @ tf.expand_dims(pooled_grads, -1)
             heatmap = tf.squeeze(heatmap)
 
-            heatmap = tf.maximum(
-                heatmap,
-                0
-            ) / (
-                tf.reduce_max(heatmap) + 1e-10
-            )
-
+            heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-10)
             heatmap_np = heatmap.numpy()
 
-            # =========================
-            # OVERLAY
-            # =========================
-
             img_np = np.array(image)
+            heatmap_resized = cv2.resize(heatmap_np, (img_np.shape[1], img_np.shape[0]))
+            heatmap_resized = np.uint8(255 * heatmap_resized)
+            heatmap_colored = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
 
-            heatmap_resized = cv2.resize(
-                heatmap_np,
-                (
-                    img_np.shape[1],
-                    img_np.shape[0]
-                )
-            )
+            heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+            superimposed = cv2.addWeighted(img_np, 0.6, heatmap_colored, 0.4, 0)    
 
-            heatmap_resized = np.uint8(
-                255 * heatmap_resized
-            )
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            label= CLASS_NAMES[predected_idx].replace(" ", "_")
+            filename = f"{timestamp}_{label}.jpg"
+            save_path = os.path.join(OUTPUT_DIR, filename)
 
-            heatmap_colored = cv2.applyColorMap(
-                heatmap_resized,
-                cv2.COLORMAP_JET
-            )
+            final_bgr = cv2.cvtColor(superimposed, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(save_path, final_bgr)
 
-            heatmap_colored = cv2.cvtColor(
-                heatmap_colored,
-                cv2.COLOR_BGR2RGB
-            )
+            _, buffer = cv2.imencode('.jpg', final_bgr)
+            heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
 
-            superimposed = cv2.addWeighted(
-                img_np,
-                0.6,
-                heatmap_colored,
-                0.4,
-                0
-            )
+            
+        # return {
+        #     "success": True,
+        #     "class": CLASS_NAMES[predicted_idx],
+        #     "confidence": float(np.max(predictions[0])),
+        #     "local_path": save_path,
+        #     "heatmap_base64": heatmap_base64
+        # }
 
-            # =========================
-            # SAVE IMAGE
-            # =========================
 
-            timestamp = datetime.now().strftime(
-                "%Y%m%d_%H%M%S"
-            )
+            pred = MODEL.predict(img_batch, verbose=0)
 
-            cls = CLASS_NAMES[
-                predicted_idx
-            ]
+            idx = np.argmax(pred[0])
+            cls = CLASS_NAMES[idx]
+            conf = float(np.max(pred[0]))
 
-            filename = f"{timestamp}_{cls}.jpg"
-
-            save_path = os.path.join(
-                OUTPUT_DIR,
-                filename
-            )
-
-            final_bgr = cv2.cvtColor(
-                superimposed,
-                cv2.COLOR_RGB2BGR
-            )
-
-            cv2.imwrite(
-                save_path,
-                final_bgr
-            )
-
-            # =========================
-            # BASE64
-            # =========================
-
-            _, buffer = cv2.imencode(
-                ".jpg",
-                final_bgr
-            )
-
-            heatmap_b64 = base64.b64encode(
-                buffer
-            ).decode("utf-8")
-
-            # =========================
-            # PREDICTION
-            # =========================
-
-            pred = preds.numpy()
-
-            conf = float(
-                np.max(pred[0])
-            )
-
-            # Optional threshold
-            if conf < 0.60:
-                cls = "uncertain"
-
-            all_predictions.append(cls)
-
+            predictions.append(cls)
             confidences.append(conf)
 
-            results.append({
-                "class": cls,
-                "confidence": conf,
-                "local_path": save_path,
-                "heatmap_base64": heatmap_b64
-            })
+        # =================================================
+        # MAJORITY VOTE
+        # =================================================
 
-        # =========================
-        # FINAL RESULT
-        # =========================
-
-        final_class = Counter(
-            all_predictions
-        ).most_common(1)[0][0]
-
+        final_class = Counter(predictions).most_common(1)[0][0]
         avg_conf = sum(confidences) / len(confidences)
 
-        sensor_data = latest_sensor_data.model_dump()
+        # =================================================
+        # SENSOR + HYBRID
+        # =================================================
 
-        threshold = check_npk_status(
-            sensor_data
-        )
+        sensor_data = latest_sensor_data.dict()
 
-        fusion = hybrid_fusion(
-            final_class,
-            avg_conf,
-            sensor_data
-        )
+        threshold = check_npk_status(sensor_data)
+
+        fusion = hybrid_fusion(final_class, avg_conf, sensor_data)
 
         return {
             "success": True,
             "final_class": final_class,
+            # "class": CLASS_NAMES[predicted_idx],
+            "confidence": float(np.max(predictions[0])),
             "cnn_confidence": avg_conf,
             "sensor_data": sensor_data,
             "sensor_support": fusion["sensor_support"],
@@ -685,8 +479,7 @@ async def predict(files: list[UploadFile] = File(...)):
             "status": fusion["status"],
             "soil_status": threshold["soil_status"],
             "notifications": threshold["notifications"],
-            "recommendations": threshold["recommendations"],
-            "results": results
+            "recommendations": threshold["recommendations"]
         }
 
     except Exception as e:
@@ -704,8 +497,4 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=3000
-    )
+    uvicorn.run(app, host="0.0.0.0", port=3000)

@@ -586,6 +586,54 @@ def evaluate_sensor_support(predicted_class, sensor):
             score = 0.40
 
     return score
+
+# =========================================================
+# CALCULATE ACTUAL DEFICIENCY FROM SENSOR
+# =========================================================
+
+def get_real_deficiency(sensor):
+    """
+    Analyzes sensor data to determine ACTUAL deficiencies.
+    Returns primary deficiency and severity score (0-1).
+    """
+    n, p, k = sensor["n"], sensor["p"], sensor["k"]
+    
+    deficiencies = {}
+    
+    # Check Nitrogen
+    if n < LOW_THRESHOLD_nitrogine:
+        severity = 1 - (n / LOW_THRESHOLD_nitrogine)  # How far below threshold
+        deficiencies["n"] = {
+            "value": n,
+            "threshold": LOW_THRESHOLD_nitrogine,
+            "severity": round(severity, 2)
+        }
+    
+    # Check Phosphorus
+    if p < LOW_THRESHOLD_phosphorus:
+        severity = 1 - (p / LOW_THRESHOLD_phosphorus)
+        deficiencies["p"] = {
+            "value": p,
+            "threshold": LOW_THRESHOLD_phosphorus,
+            "severity": round(severity, 2)
+        }
+    
+    # Check Potassium
+    if k < LOW_THRESHOLD_potassium:
+        severity = 1 - (k / LOW_THRESHOLD_potassium)
+        deficiencies["k"] = {
+            "value": k,
+            "threshold": LOW_THRESHOLD_potassium,
+            "severity": round(severity, 2)
+        }
+    
+    # Find primary deficiency (highest severity)
+    if deficiencies:
+        primary = max(deficiencies.items(), key=lambda x: x[1]["severity"])
+        return primary[0], primary[1]
+    
+    return None, None
+
 # =========================================================
 # HYBRID FUSION
 # =========================================================
@@ -730,6 +778,11 @@ async def predict(
             threshold_result = check_npk_status(
                 sensor_data
             )
+            
+            # Get real deficiency from sensor
+            real_deficiency_class, real_deficiency_info = get_real_deficiency(
+                sensor_data
+            )
 
             # =================================================
             # HYBRID FUSION
@@ -748,7 +801,7 @@ async def predict(
             result = {
                 "success": True,
 
-                # CNN
+                # CNN PREDICTION
                 "cnn_class":
                     predicted_class,
 
@@ -756,6 +809,13 @@ async def predict(
                     fusion_result[
                         "cnn_confidence"
                     ],
+
+                # REAL SENSOR DEFICIENCY
+                "real_deficiency_class":
+                    real_deficiency_class,
+
+                "real_deficiency_info":
+                    real_deficiency_info,
 
                 # HEATMAP
                 "heatmap_filename":

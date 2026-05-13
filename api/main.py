@@ -761,8 +761,6 @@ async def predict(
                 "heatmap_filename":
                     heatmap_filename,
 
-                "heatmap_base64":
-                    heatmap_base64,
 
                 # SENSOR
                 "sensor_data":

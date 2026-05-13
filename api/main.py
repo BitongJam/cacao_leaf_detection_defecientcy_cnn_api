@@ -872,28 +872,227 @@ async def predict(
         # =================================================
 
         if len(results) == 1:
-            # Single image - return single prediction
+
+            # =================================================
+            # SINGLE IMAGE RESULT
+            # =================================================
+
             return results[0]
 
         else:
-            # Multiple images - return best class summary + all details
-            avg_confidence = (
-                total_confidence / len(results)
+
+            # =================================================
+            # MULTI IMAGE ANALYSIS
+            # =================================================
+
+            class_scores = {
+                "n": 0,
+                "p": 0,
+                "k": 0,
+                "healthy": 0,
+                "not_cacao": 0
+            }
+
+            class_counts = {
+                "n": 0,
+                "p": 0,
+                "k": 0,
+                "healthy": 0,
+                "not_cacao": 0
+            }
+
+            # =================================================
+            # AGGREGATE RESULTS
+            # =================================================
+
+            for item in results:
+
+                cls = item["cnn_class"]
+
+                conf = item["final_confidence"]
+
+                class_scores[cls] += conf
+
+                class_counts[cls] += 1
+
+            # =================================================
+            # AVERAGE CONFIDENCE
+            # =================================================
+
+            avg_confidence = round(
+                total_confidence / len(results),
+                4
             )
 
-            best_class = max(
-                class_confidences.items(),
-                key=lambda x: (
-                    sum(x[1]) / len(x[1])
+            # =================================================
+            # SENSOR ANALYSIS
+            # =================================================
+
+            sensor_data = latest_sensor_data.dict()
+
+            threshold_result = check_npk_status(
+                sensor_data
+            )
+
+            real_deficiency_class, real_deficiency_info = (
+                get_real_deficiency(sensor_data)
+            )
+
+            # =================================================
+            # FINAL DECISION
+            # SENSOR PRIORITY
+            # =================================================
+
+            if real_deficiency_class is not None:
+
+                final_class = real_deficiency_class
+
+                decision_source = "sensor_priority"
+
+            else:
+
+                final_class = max(
+                    class_scores,
+                    key=class_scores.get
                 )
-            )[0]
+
+                decision_source = "cnn_weighted_voting"
+
+            # =================================================
+            # DEFICIENCY LABEL
+            # =================================================
+
+            deficiency_map = {
+                "n": "Nitrogen Deficiency",
+                "p": "Phosphorus Deficiency",
+                "k": "Potassium Deficiency",
+                "healthy": "Healthy Leaf",
+                "not_cacao": "Not Cacao Leaf"
+            }
+
+            deficiency_label = deficiency_map.get(
+                final_class,
+                "Unknown"
+            )
+
+            # =================================================
+            # SEVERITY LABEL
+            # =================================================
+
+            severity_label = "NORMAL"
+
+            if real_deficiency_info:
+
+                severity = real_deficiency_info["severity"]
+
+                if severity >= 0.7:
+
+                    severity_label = "SEVERE"
+
+                elif severity >= 0.4:
+
+                    severity_label = "MODERATE"
+
+                else:
+
+                    severity_label = "MILD"
+
+            # =================================================
+            # OVERALL STATUS
+            # =================================================
+
+            if avg_confidence >= 0.85:
+
+                overall_status = "STRONG DETECTION"
+
+            elif avg_confidence >= 0.60:
+
+                overall_status = "MODERATE DETECTION"
+
+            else:
+
+                overall_status = "WEAK DETECTION"
+
+            # =================================================
+            # FINAL TREE RESULT
+            # =================================================
 
             return {
+
                 "success": True,
-                "best_class": best_class,
-                "avg_confidence": avg_confidence,
-                "total_images": len(results),
-                "details": results
+
+                # =============================================
+                # OVERALL TREE DIAGNOSIS
+                # =============================================
+
+                "overall_result": {
+
+                    "final_class":
+                        final_class,
+
+                    "deficiency":
+                        deficiency_label,
+
+                    "confidence":
+                        avg_confidence,
+
+                    "status":
+                        overall_status,
+
+                    "severity":
+                        severity_label,
+
+                    "decision_source":
+                        decision_source
+                },
+
+                # =============================================
+                # SENSOR ANALYSIS
+                # =============================================
+
+                "sensor_analysis": {
+
+                    "sensor_data":
+                        sensor_data,
+
+                    "real_deficiency_class":
+                        real_deficiency_class,
+
+                    "real_deficiency_info":
+                        real_deficiency_info,
+
+                    "soil_status":
+                        threshold_result["soil_status"],
+
+                    "notifications":
+                        threshold_result["notifications"],
+
+                    "recommendations":
+                        threshold_result["recommendations"]
+                },
+
+                # =============================================
+                # IMAGE ANALYSIS
+                # =============================================
+
+                "image_analysis": {
+
+                    "total_images":
+                        len(results),
+
+                    "class_counts":
+                        class_counts,
+
+                    "class_scores":
+                        class_scores
+                },
+
+                # =============================================
+                # INDIVIDUAL IMAGE RESULTS
+                # =============================================
+
+                "details":
+                    results
             }
 
     except Exception as e:

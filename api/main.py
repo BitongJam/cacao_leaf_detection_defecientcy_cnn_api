@@ -1,18 +1,18 @@
 import io
 import os
 import cv2
-import json
 import time
+import json
+import base64
 import serial
 import asyncio
-import traceback
 import numpy as np
 import tensorflow as tf
 
 from PIL import Image
 from pathlib import Path
 from datetime import datetime
-from collections import Counter
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import (
@@ -23,24 +23,22 @@ from fastapi import (
 )
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import (
+    FileResponse,
+    StreamingResponse
+)
 
 from pydantic import BaseModel
-
-# =========================================================
-# ENVIRONMENT
-# =========================================================
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 # =========================================================
 # FASTAPI
 # =========================================================
 
-app = FastAPI(
-    title="Hybrid CNN + NPK API"
-)
+app = FastAPI()
+
+# =========================================================
+# CORS
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,37 +49,21 @@ app.add_middleware(
 )
 
 # =========================================================
-# OUTPUT DIR
+# OUTPUT DIRECTORY
 # =========================================================
 
 OUTPUT_DIR = "detected_heatmaps"
-
-os.makedirs(
-    OUTPUT_DIR,
-    exist_ok=True
-)
-
-app.mount(
-    "/heatmaps",
-    StaticFiles(directory=OUTPUT_DIR),
-    name="heatmaps"
-)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # =========================================================
-# LOAD MODEL
+# LOAD CNN MODEL
 # =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-MODEL_PATH = (
-    BASE_DIR /
-    "models" /
-    "final_model.keras"
-)
+MODEL_PATH = BASE_DIR / "models" / "final_model.keras"
 
-MODEL = tf.keras.models.load_model(
-    MODEL_PATH
-)
+MODEL = tf.keras.models.load_model(MODEL_PATH)
 
 CLASS_NAMES = [
     "k",
@@ -91,60 +73,99 @@ CLASS_NAMES = [
     "not_cacao"
 ]
 
-print("✅ MODEL LOADED")
+print("✅ CNN MODEL LOADED")
 
 # =========================================================
-# FIND LAST CONV
+# GRAD-CAM HEATMAP FUNCTION
 # =========================================================
 
-def find_last_conv_layer(model):
-
-    for layer in reversed(model.layers):
-
+def generate_heatmap(image, img_batch, predicted_idx):
+    """
+    Generate Grad-CAM heatmap for the prediction.
+    Returns the superimposed image as numpy array and base64 encoded string.
+    """
+    try:
+        # Get the last convolutional layer
         try:
-
-            if len(layer.output.shape) == 4:
-                return layer.name
-
+            target_layer = MODEL.get_layer("last_conv_layer")
         except:
-            continue
+            # Fallback to last Conv2D layer if named layer not found
+            target_layer = [layer for layer in MODEL.layers if "conv" in layer.name.lower()][-1]
 
-    raise Exception(
-        "No convolution layer found"
-    )
+        # Create gradient model
+        grad_model = tf.keras.Model(
+            inputs=MODEL.inputs,
+            outputs=[target_layer.output, MODEL.output]
+        )
 
-LAST_CONV_LAYER = find_last_conv_layer(
-    MODEL
-)
+        # Compute gradients
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(img_batch)
+            loss = predictions[:, predicted_idx]
 
-print(
-    "✅ LAST CONV LAYER:",
-    LAST_CONV_LAYER
-)
+        # Get gradients
+        grads = tape.gradient(loss, conv_outputs)
+        
+        # Global Average Pooling
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+        # Generate heatmap
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ tf.expand_dims(pooled_grads, -1)
+        heatmap = tf.squeeze(heatmap)
+
+        # ReLU and normalize
+        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
+        heatmap_np = heatmap.numpy()
+
+        # Convert image to numpy
+        img_np = np.array(image)
+        
+        # Resize heatmap to match original image size
+        heatmap_resized = cv2.resize(heatmap_np, (img_np.shape[1], img_np.shape[0]))
+        
+        # Apply colormap
+        heatmap_color = np.uint8(255 * heatmap_resized)
+        heatmap_color = cv2.applyColorMap(np.ascontiguousarray(heatmap_color), cv2.COLORMAP_JET)
+        
+        # Convert BGR to RGB
+        heatmap_color_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+        
+        # Blend images (60% original, 40% heatmap)
+        superimposed_img = cv2.addWeighted(img_np, 0.6, heatmap_color_rgb, 0.4, 0)
+
+        # Convert back to BGR for saving
+        final_bgr = cv2.cvtColor(superimposed_img, cv2.COLOR_RGB2BGR)
+        
+        # Encode to base64
+        _, buffer = cv2.imencode('.jpg', final_bgr)
+        heatmap_base64 = base64.b64encode(buffer.tobytes()).decode('utf-8')
+
+        return final_bgr, heatmap_base64
+
+    except Exception as e:
+        print(f"❌ HEATMAP ERROR: {str(e)}")
+        return None, None
 
 # =========================================================
-# SERIAL
+# SERIAL SETUP (NPK SENSOR)
 # =========================================================
 
-try:
-
-    ser = serial.Serial(
-        "/dev/serial0",
-        baudrate=9600,
-        timeout=1
-    )
-
-    print("✅ SERIAL CONNECTED")
-
-except Exception as e:
-
-    print("❌ SERIAL ERROR:", e)
-
-    ser = None
+ser = serial.Serial(
+    '/dev/serial0',
+    baudrate=9600,
+    timeout=1
+)
 
 npk_query = bytearray([
-    0x01, 0x03, 0x00, 0x1e,
-    0x00, 0x03, 0x65, 0xcd
+    0x01,
+    0x03,
+    0x00,
+    0x1e,
+    0x00,
+    0x03,
+    0x65,
+    0xcd
 ])
 
 # =========================================================
@@ -153,19 +174,11 @@ npk_query = bytearray([
 
 clients = set()
 
-MAX_FILE_SIZE = 5 * 1024 * 1024
-
-ALLOWED_TYPES = [
-    "image/jpeg",
-    "image/png"
-]
-
 # =========================================================
 # SENSOR MODEL
 # =========================================================
 
 class NPKData(BaseModel):
-
     n: int
     p: int
     k: int
@@ -179,32 +192,23 @@ latest_sensor_data = NPKData(
 )
 
 # =========================================================
-# THRESHOLDS
+# THRESHOLD SETTINGS
 # =========================================================
 
-LOW_N = 15
-HIGH_N = 25
+LOW_THRESHOLD_nitrogine = 15
+HIGH_THRESHOLD_nitrogine = 25
 
-LOW_P = 10
-HIGH_P = 20
+LOW_THRESHOLD_phosphorus = 10
+HIGH_THRESHOLD_phosphorus = 20
 
-LOW_K = 20
-HIGH_K = 40
+LOW_THRESHOLD_potassium = 20
+HIGH_THRESHOLD_potassium = 40
 
-# =========================================================
-# TF INFERENCE
-# =========================================================
-
-@tf.function
-def infer(x):
-
-    return MODEL(
-        x,
-        training=False
-    )
+LOW_THRESHOLD = 20
+HIGH_THRESHOLD = 80
 
 # =========================================================
-# SENSOR STATUS
+# NPK STATUS CHECKER
 # =========================================================
 
 def check_npk_status(sensor):
@@ -217,27 +221,27 @@ def check_npk_status(sensor):
     recommendations = []
 
     # =====================================================
-    # N
+    # NITROGEN
     # =====================================================
 
-    if n < LOW_N:
+    if n <  LOW_THRESHOLD_nitrogine:
 
         notifications.append(
             "LOW NITROGEN"
         )
 
         recommendations.append(
-            "Apply Nitrogen fertilizer"
+            "Apply Nitrogen fertilizer (Urea)"
         )
 
-    elif n > HIGH_N:
+    elif n > HIGH_THRESHOLD_nitrogine:
 
         notifications.append(
             "HIGH NITROGEN"
         )
 
         recommendations.append(
-            "Reduce Nitrogen fertilizer"
+            "Reduce Nitrogen fertilizer application"
         )
 
     else:
@@ -247,10 +251,10 @@ def check_npk_status(sensor):
         )
 
     # =====================================================
-    # P
+    # PHOSPHORUS
     # =====================================================
 
-    if p < LOW_P:
+    if p < LOW_THRESHOLD_phosphorus:
 
         notifications.append(
             "LOW PHOSPHORUS"
@@ -260,7 +264,7 @@ def check_npk_status(sensor):
             "Apply Phosphorus fertilizer"
         )
 
-    elif p > HIGH_P:
+    elif p > HIGH_THRESHOLD_phosphorus:
 
         notifications.append(
             "HIGH PHOSPHORUS"
@@ -277,10 +281,10 @@ def check_npk_status(sensor):
         )
 
     # =====================================================
-    # K
+    # POTASSIUM
     # =====================================================
 
-    if k < LOW_K:
+    if k < LOW_THRESHOLD_potassium:
 
         notifications.append(
             "LOW POTASSIUM"
@@ -290,7 +294,7 @@ def check_npk_status(sensor):
             "Apply Potassium fertilizer"
         )
 
-    elif k > HIGH_K:
+    elif k > HIGH_THRESHOLD_potassium:
 
         notifications.append(
             "HIGH POTASSIUM"
@@ -307,13 +311,13 @@ def check_npk_status(sensor):
         )
 
     # =====================================================
-    # SOIL STATUS
+    # SOIL HEALTH
     # =====================================================
 
     if (
-        LOW_N <= n <= HIGH_N and
-        LOW_P <= p <= HIGH_P and
-        LOW_K <= k <= HIGH_K
+        LOW_THRESHOLD_nitrogine <= n <= HIGH_THRESHOLD_nitrogine and
+        LOW_THRESHOLD_phosphorus <= p <= HIGH_THRESHOLD_phosphorus and
+        LOW_THRESHOLD_potassium <= k <= HIGH_THRESHOLD_potassium
     ):
 
         soil_status = "SOIL HEALTHY"
@@ -323,25 +327,16 @@ def check_npk_status(sensor):
         soil_status = "SOIL NEEDS ATTENTION"
 
     return {
-
-        "notifications":
-            notifications,
-
-        "recommendations":
-            recommendations,
-
-        "soil_status":
-            soil_status
+        "notifications": notifications,
+        "recommendations": recommendations,
+        "soil_status": soil_status
     }
 
 # =========================================================
-# READ SENSOR
+# READ NPK SENSOR
 # =========================================================
 
 def read_npk_sensor():
-
-    if ser is None:
-        return None
 
     try:
 
@@ -351,38 +346,30 @@ def read_npk_sensor():
 
         response = ser.read(11)
 
-        if len(response) == 11:
+        print("RAW:", response.hex())
 
-            n = (
-                response[3] << 8
-            ) | response[4]
+        if (
+            len(response) == 11 and
+            response[0] == 0x01 and
+            response[1] == 0x03
+        ):
 
-            p = (
-                response[5] << 8
-            ) | response[6]
-
-            k = (
-                response[7] << 8
-            ) | response[8]
+            n = (response[3] << 8) | response[4]
+            p = (response[5] << 8) | response[6]
+            k = (response[7] << 8) | response[8]
 
             return {
-
                 "n": n,
                 "p": p,
                 "k": k,
-
-                "time":
-                    datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
+                "time": datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
             }
 
     except Exception as e:
 
-        print(
-            "SENSOR ERROR:",
-            e
-        )
+        print("SENSOR ERROR:", e)
 
     return None
 
@@ -396,60 +383,46 @@ async def sensor_loop():
 
     while True:
 
-        try:
+        data = read_npk_sensor()
 
-            loop = asyncio.get_running_loop()
+        if data:
 
-            data = await loop.run_in_executor(
-                None,
-                read_npk_sensor
+            latest_sensor_data = NPKData(**data)
+
+            threshold_result = check_npk_status(
+                data
             )
 
-            if data:
+            payload = {
 
-                latest_sensor_data = (
-                    NPKData(**data)
-                )
+                "sensor_data":
+                    latest_sensor_data.dict(),
 
-                result = check_npk_status(
-                    data
-                )
+                "notifications":
+                    threshold_result["notifications"],
 
-                payload = {
+                "recommendations":
+                    threshold_result["recommendations"],
 
-                    "sensor_data":
-                        latest_sensor_data.dict(),
+                "soil_status":
+                    threshold_result["soil_status"]
+            }
 
-                    "notifications":
-                        result["notifications"],
+            print("LIVE:", payload)
 
-                    "recommendations":
-                        result["recommendations"],
-
-                    "soil_status":
-                        result["soil_status"]
-                }
-
-                await broadcast(payload)
-
-        except Exception as e:
-
-            print(
-                "SENSOR LOOP ERROR:",
-                e
-            )
+            await broadcast(payload)
 
         await asyncio.sleep(2)
 
 # =========================================================
-# BROADCAST
+# WEBSOCKET BROADCAST
 # =========================================================
 
 async def broadcast(data):
 
     disconnected = []
 
-    for ws in list(clients):
+    for ws in clients:
 
         try:
 
@@ -464,7 +437,7 @@ async def broadcast(data):
         clients.discard(ws)
 
 # =========================================================
-# LIFESPAN
+# APP LIFESPAN
 # =========================================================
 
 @asynccontextmanager
@@ -478,28 +451,7 @@ async def lifespan(app: FastAPI):
 
     task.cancel()
 
-    try:
-
-        await task
-
-    except asyncio.CancelledError:
-
-        print(
-            "Sensor Loop Stopped"
-        )
-
 app.router.lifespan_context = lifespan
-
-# =========================================================
-# HEALTH
-# =========================================================
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "running"
-    }
 
 # =========================================================
 # SENSOR API
@@ -508,25 +460,23 @@ def health():
 @app.get("/sensor")
 def get_sensor():
 
-    sensor = latest_sensor_data.dict()
-
-    result = check_npk_status(
-        sensor
+    threshold_result = check_npk_status(
+        latest_sensor_data.dict()
     )
 
     return {
 
         "sensor_data":
-            sensor,
+            latest_sensor_data.dict(),
 
         "notifications":
-            result["notifications"],
+            threshold_result["notifications"],
 
         "recommendations":
-            result["recommendations"],
+            threshold_result["recommendations"],
 
         "soil_status":
-            result["soil_status"]
+            threshold_result["soil_status"]
     }
 
 # =========================================================
@@ -540,30 +490,26 @@ async def sensor_stream():
 
         while True:
 
-            sensor = latest_sensor_data.dict()
-
-            result = check_npk_status(
-                sensor
+            threshold_result = check_npk_status(
+                latest_sensor_data.dict()
             )
 
             payload = {
 
                 "sensor_data":
-                    sensor,
+                    latest_sensor_data.dict(),
 
                 "notifications":
-                    result["notifications"],
+                    threshold_result["notifications"],
 
                 "recommendations":
-                    result["recommendations"],
+                    threshold_result["recommendations"],
 
                 "soil_status":
-                    result["soil_status"]
+                    threshold_result["soil_status"]
             }
 
-            yield (
-                f"data: {json.dumps(payload)}\n\n"
-            )
+            yield f"data: {json.dumps(payload)}\n\n"
 
             await asyncio.sleep(2)
 
@@ -591,486 +537,342 @@ async def websocket_endpoint(
 
             await asyncio.sleep(1)
 
+    except:
+
+        pass
+
     finally:
 
         clients.discard(websocket)
 
 # =========================================================
+# SENSOR SUPPORT
+# =========================================================
+
+def evaluate_sensor_support(predicted_class, sensor):
+
+    n, p, k = sensor["n"], sensor["p"], sensor["k"]
+
+    score = 0.5
+
+    if predicted_class == "n":
+        if n < 20:
+            score = 0.75
+        elif n > 40:
+            score = 0.30
+        else:
+            score = 0.95
+
+    elif predicted_class == "p":
+        if p < 10:
+            score = 0.75
+        elif p > 20:
+            score = 0.30
+        else:
+            score = 0.95
+
+    elif predicted_class == "k":
+        if k < 20:
+            score = 0.75
+        elif k > 40:
+            score = 0.30
+        else:
+            score = 0.95
+
+    elif predicted_class == "healthy":
+        if n >= 10 and n <= 25 and p >= 10 and p <= 20 and k >= 20 and k <= 40:
+            score = 0.95
+        else:
+            score = 0.40
+
+    return score
+# =========================================================
 # HYBRID FUSION
 # =========================================================
 
 def hybrid_fusion(
-    predicted_class,
+    cnn_class,
     cnn_confidence,
-    sensor
+    sensor_data
 ):
 
-    final_conf = cnn_confidence
+    sensor_support = evaluate_sensor_support(
+        cnn_class,
+        sensor_data
+    )
 
-    n = sensor["n"]
-    p = sensor["p"]
-    k = sensor["k"]
-
-    # =====================================================
-    # N
-    # =====================================================
-
-    if predicted_class == "n":
-
-        if n < 15:
-
-            final_conf += 0.10
-
-        elif n > 35:
-
-            final_conf -= 0.25
-
-    # =====================================================
-    # P
-    # =====================================================
-
-    elif predicted_class == "p":
-
-        if p < 10:
-
-            final_conf += 0.10
-
-        elif p > 25:
-
-            final_conf -= 0.25
-
-    # =====================================================
-    # K
-    # =====================================================
-
-    elif predicted_class == "k":
-
-        if k < 20:
-
-            final_conf += 0.10
-
-        elif k > 45:
-
-            final_conf -= 0.25
-
-    # =====================================================
-    # HEALTHY
-    # =====================================================
-
-    elif predicted_class == "healthy":
-
-        if (
-            15 <= n <= 25 and
-            10 <= p <= 20 and
-            20 <= k <= 40
-        ):
-
-            final_conf += 0.10
-
-        else:
-
-            final_conf -= 0.20
-
-    # =====================================================
-    # LIMIT
-    # =====================================================
-
-    final_conf = max(
-        0.0,
-        min(final_conf, 1.0)
+    final_confidence = (
+        (cnn_confidence * 0.7) +
+        (sensor_support * 0.3)
     )
 
     # =====================================================
     # STATUS
     # =====================================================
 
-    if final_conf >= 0.90:
+    if final_confidence >= 0.85:
 
-        status = "VERY STRONG"
+        status = "STRONG DETECTION"
 
-    elif final_conf >= 0.75:
+    elif final_confidence >= 0.60:
 
-        status = "STRONG"
-
-    elif final_conf >= 0.60:
-
-        status = "MODERATE"
+        status = "MODERATE DETECTION"
 
     else:
 
-        status = "WEAK"
+        status = "WEAK DETECTION"
 
     return {
 
+        "cnn_confidence":
+            cnn_confidence,
+
+        "sensor_support":
+            sensor_support,
+
         "final_confidence":
-            final_conf,
+            final_confidence,
 
         "status":
             status
     }
 
 # =========================================================
-# GENERATE GRADCAM
-# =========================================================
-
-def generate_gradcam(
-    model,
-    img_array
-):
-
-    grad_model = tf.keras.models.Model(
-
-        [model.inputs],
-
-        [
-            model.get_layer(
-                LAST_CONV_LAYER
-            ).output,
-
-            model.output
-        ]
-    )
-
-    with tf.GradientTape() as tape:
-
-        conv_outputs, predictions = (
-            grad_model(img_array)
-        )
-
-        predicted_idx = tf.argmax(
-            predictions[0]
-        )
-
-        loss = predictions[
-            :,
-            predicted_idx
-        ]
-
-    grads = tape.gradient(
-        loss,
-        conv_outputs
-    )
-
-    pooled_grads = tf.reduce_mean(
-        grads,
-        axis=(0, 1, 2)
-    )
-
-    conv_outputs = conv_outputs[0]
-
-    heatmap = tf.reduce_sum(
-
-        tf.multiply(
-            pooled_grads,
-            conv_outputs
-        ),
-
-        axis=-1
-    )
-
-    heatmap = tf.maximum(
-        heatmap,
-        0
-    )
-
-    max_heat = tf.reduce_max(
-        heatmap
-    )
-
-    if max_heat == 0:
-        return None
-
-    heatmap /= max_heat
-
-    return heatmap.numpy()
-
-# =========================================================
-# PREDICT
+# UNIFIED PREDICT (SINGLE & MULTIPLE IMAGES)
 # =========================================================
 
 @app.post("/predict")
 async def predict(
-
     files: list[UploadFile] = File(...)
 ):
+    """
+    Unified endpoint that handles both single and multiple image predictions.
+    - Single image: returns one prediction with heatmap
+    - Multiple images: returns best_class with all predictions and heatmaps
+    """
 
     try:
 
-        predictions = []
-        confidences = []
-        heatmaps = []
+        results = []
+        total_confidence = 0
+        class_confidences = defaultdict(list)
+
+        # =================================================
+        # PROCESS EACH IMAGE
+        # =================================================
 
         for file in files:
 
-            # =================================================
-            # VALIDATE
-            # =================================================
+            file_bytes = await file.read()
 
-            if (
-                file.content_type
-                not in ALLOWED_TYPES
-            ):
-                continue
+            image = Image.open(
+                io.BytesIO(file_bytes)
+            ).convert("RGB")
 
-            img_bytes = await file.read()
-
-            if len(img_bytes) == 0:
-                continue
-
-            if len(img_bytes) > MAX_FILE_SIZE:
-
-                return {
-
-                    "success": False,
-
-                    "error":
-                        "Image too large"
-                }
-
-            # =================================================
-            # LOAD IMAGE
-            # =================================================
-
-            try:
-
-                image = Image.open(
-                    io.BytesIO(img_bytes)
-                ).convert("RGB")
-
-            except:
-
-                continue
-
-            image = image.resize(
+            img_resized = image.resize(
                 (224, 224)
             )
 
-            img_np = np.array(image)
+            img_array = np.array(
+                img_resized
+            ).astype("float32")
 
-            # =================================================
-            # PREPROCESS
-            # =================================================
-
-            img_array = (
-                img_np.astype("float32")
-                / 255.0
-            )
-
-            img_batch = np.expand_dims(
+            img_batch = tf.expand_dims(
                 img_array,
-                axis=0
+                0
             )
 
             # =================================================
-            # PREDICT
+            # CNN PREDICTION
             # =================================================
 
-            loop = asyncio.get_running_loop()
-
-            preds = await loop.run_in_executor(
-
-                None,
-
-                lambda:
-                    infer(img_batch).numpy()
+            predictions = MODEL.predict(
+                img_batch,
+                verbose=0
             )
 
-            idx = np.argmax(
-                preds[0]
+            predicted_idx = np.argmax(
+                predictions[0]
             )
 
-            cls = CLASS_NAMES[idx]
+            predicted_class = CLASS_NAMES[
+                predicted_idx
+            ]
 
-            conf = float(
-                np.max(preds[0])
+            cnn_confidence = float(
+                np.max(predictions[0])
             )
-
-            predictions.append(cls)
-
-            confidences.append(conf)
 
             # =================================================
-            # GRADCAM
+            # HEATMAP GENERATION
             # =================================================
 
-            heatmap = generate_gradcam(
-                MODEL,
-                img_batch
+            heatmap_bgr, heatmap_base64 = generate_heatmap(
+                image,
+                img_batch,
+                predicted_idx
             )
 
-            if heatmap is not None:
+            heatmap_filename = None
+            if heatmap_bgr is not None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                label = CLASS_NAMES[predicted_idx].replace(" ", "_")
+                heatmap_filename = f"{timestamp}_{label}.jpg"
+                save_path = os.path.join(OUTPUT_DIR, heatmap_filename)
+                cv2.imwrite(save_path, heatmap_bgr)
 
-                heatmap = cv2.resize(
+            # =================================================
+            # SENSOR DATA
+            # =================================================
 
-                    heatmap,
+            sensor_data = latest_sensor_data.dict()
 
-                    (
-                        img_np.shape[1],
-                        img_np.shape[0]
-                    )
-                )
+            threshold_result = check_npk_status(
+                sensor_data
+            )
 
-                heatmap = np.uint8(
-                    255 * heatmap
-                )
+            # =================================================
+            # HYBRID FUSION
+            # =================================================
 
-                heatmap_color = (
-                    cv2.applyColorMap(
-                        heatmap,
-                        cv2.COLORMAP_JET
-                    )
-                )
+            fusion_result = hybrid_fusion(
+                predicted_class,
+                cnn_confidence,
+                sensor_data
+            )
 
-                superimposed = (
-                    cv2.addWeighted(
+            # =================================================
+            # STORE RESULT
+            # =================================================
 
-                        img_np,
-                        0.65,
+            result = {
+                "success": True,
 
-                        heatmap_color,
-                        0.35,
+                # CNN
+                "cnn_class":
+                    predicted_class,
 
-                        0
-                    )
-                )
+                "cnn_confidence":
+                    fusion_result[
+                        "cnn_confidence"
+                    ],
 
-                # =============================================
-                # SAVE IMAGE
-                # =============================================
+                # HEATMAP
+                "heatmap_filename":
+                    heatmap_filename,
 
-                timestamp = (
-                    datetime.now().strftime(
-                        "%Y%m%d_%H%M%S_%f"
-                    )
-                )
+                "heatmap_base64":
+                    heatmap_base64,
 
-                filename = (
-                    f"{timestamp}_{cls}.jpg"
-                )
+                # SENSOR
+                "sensor_data":
+                    sensor_data,
 
-                save_path = os.path.join(
-                    OUTPUT_DIR,
-                    filename
-                )
+                "sensor_support":
+                    fusion_result[
+                        "sensor_support"
+                    ],
 
-                final_bgr = cv2.cvtColor(
-                    superimposed,
-                    cv2.COLOR_RGB2BGR
-                )
+                # HYBRID
+                "final_confidence":
+                    fusion_result[
+                        "final_confidence"
+                    ],
 
-                cv2.imwrite(
-                    save_path,
-                    final_bgr
-                )
+                "status":
+                    fusion_result[
+                        "status"
+                    ],
 
-                heatmaps.append({
+                # THRESHOLD
+                "soil_status":
+                    threshold_result[
+                        "soil_status"
+                    ],
 
-                    "class":
-                        cls,
+                "notifications":
+                    threshold_result[
+                        "notifications"
+                    ],
 
-                    "confidence":
-                        conf,
-
-                    "heatmap_url":
-                        f"/heatmaps/{filename}",
-
-                    "local_path":
-                        save_path
-                })
-
-        # =====================================================
-        # NO VALID IMAGE
-        # =====================================================
-
-        if not predictions:
-
-            return {
-
-                "success": False,
-
-                "error":
-                    "No valid image uploaded"
+                "recommendations":
+                    threshold_result[
+                        "recommendations"
+                    ]
             }
 
-        # =====================================================
-        # MAJORITY VOTE
-        # =====================================================
+            results.append(result)
 
-        final_class = Counter(
-            predictions
-        ).most_common(1)[0][0]
+            cls = result["cnn_class"]
+            conf = result["final_confidence"]
 
-        avg_conf = (
-            sum(confidences)
-            / len(confidences)
-        )
+            total_confidence += conf
+            class_confidences[cls].append(conf)
 
-        # =====================================================
-        # SENSOR DATA
-        # =====================================================
+        # =================================================
+        # RETURN BASED ON IMAGE COUNT
+        # =================================================
 
-        sensor_data = latest_sensor_data.dict()
+        if len(results) == 1:
+            # Single image - return single prediction
+            return results[0]
 
-        threshold = check_npk_status(
-            sensor_data
-        )
+        else:
+            # Multiple images - return best class summary + all details
+            avg_confidence = (
+                total_confidence / len(results)
+            )
 
-        fusion = hybrid_fusion(
+            best_class = max(
+                class_confidences.items(),
+                key=lambda x: (
+                    sum(x[1]) / len(x[1])
+                )
+            )[0]
 
-            final_class,
-            avg_conf,
-            sensor_data
-        )
-
-        # =====================================================
-        # RESPONSE
-        # =====================================================
-
-        return {
-
-            "success": True,
-
-            "final_class":
-                final_class,
-
-            "cnn_confidence":
-                avg_conf,
-
-            "sensor_data":
-                sensor_data,
-
-            "final_confidence":
-                fusion["final_confidence"],
-
-            "status":
-                fusion["status"],
-
-            "soil_status":
-                threshold["soil_status"],
-
-            "notifications":
-                threshold["notifications"],
-
-            "recommendations":
-                threshold["recommendations"],
-
-            "heatmaps":
-                heatmaps
-        }
+            return {
+                "success": True,
+                "best_class": best_class,
+                "avg_confidence": avg_confidence,
+                "total_images": len(results),
+                "details": results
+            }
 
     except Exception as e:
 
-        traceback.print_exc()
+        print("ERROR:", str(e))
 
         return {
-
             "success": False,
-
             "error": str(e)
         }
 
 # =========================================================
-# RUN SERVER
+# DOWNLOAD
+# =========================================================
+
+@app.get("/download/{filename}")
+def download_file(filename: str):
+
+    file_path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
+
+    if not os.path.exists(file_path):
+
+        return {
+            "detail": "File not found"
+        }
+
+    return FileResponse(
+        file_path,
+        media_type="image/jpeg",
+        filename=filename
+    )
+
+# =========================================================
+# RUN
 # =========================================================
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@ import os
 import cv2
 import json
 import time
-import base64
 import serial
 import asyncio
 import traceback
@@ -39,25 +38,28 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 # FASTAPI
 # =========================================================
 
-app = FastAPI(title="Hybrid CNN + NPK API")
+app = FastAPI(
+    title="Hybrid CNN + NPK API"
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "*"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # =========================================================
-# OUTPUT DIRECTORY
+# OUTPUT DIR
 # =========================================================
 
 OUTPUT_DIR = "detected_heatmaps"
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(
+    OUTPUT_DIR,
+    exist_ok=True
+)
 
 app.mount(
     "/heatmaps",
@@ -71,9 +73,15 @@ app.mount(
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-MODEL_PATH = BASE_DIR / "models" / "final_model.keras"
+MODEL_PATH = (
+    BASE_DIR /
+    "models" /
+    "final_model.keras"
+)
 
-MODEL = tf.keras.models.load_model(MODEL_PATH)
+MODEL = tf.keras.models.load_model(
+    MODEL_PATH
+)
 
 CLASS_NAMES = [
     "k",
@@ -86,7 +94,7 @@ CLASS_NAMES = [
 print("✅ MODEL LOADED")
 
 # =========================================================
-# FIND LAST CONV LAYER
+# FIND LAST CONV
 # =========================================================
 
 def find_last_conv_layer(model):
@@ -94,20 +102,28 @@ def find_last_conv_layer(model):
     for layer in reversed(model.layers):
 
         try:
+
             if len(layer.output.shape) == 4:
                 return layer.name
 
         except:
             continue
 
-    raise Exception("No Conv Layer Found")
+    raise Exception(
+        "No convolution layer found"
+    )
 
-LAST_CONV_LAYER = find_last_conv_layer(MODEL)
+LAST_CONV_LAYER = find_last_conv_layer(
+    MODEL
+)
 
-print("✅ LAST CONV:", LAST_CONV_LAYER)
+print(
+    "✅ LAST CONV LAYER:",
+    LAST_CONV_LAYER
+)
 
 # =========================================================
-# SERIAL SETUP
+# SERIAL
 # =========================================================
 
 try:
@@ -166,9 +182,14 @@ latest_sensor_data = NPKData(
 # THRESHOLDS
 # =========================================================
 
-LOW_N, HIGH_N = 15, 25
-LOW_P, HIGH_P = 10, 20
-LOW_K, HIGH_K = 20, 40
+LOW_N = 15
+HIGH_N = 25
+
+LOW_P = 10
+HIGH_P = 20
+
+LOW_K = 20
+HIGH_K = 40
 
 # =========================================================
 # TF INFERENCE
@@ -177,7 +198,10 @@ LOW_K, HIGH_K = 20, 40
 @tf.function
 def infer(x):
 
-    return MODEL(x, training=False)
+    return MODEL(
+        x,
+        training=False
+    )
 
 # =========================================================
 # SENSOR STATUS
@@ -192,78 +216,126 @@ def check_npk_status(sensor):
     notifications = []
     recommendations = []
 
+    # =====================================================
     # N
+    # =====================================================
+
     if n < LOW_N:
 
-        notifications.append("LOW NITROGEN")
+        notifications.append(
+            "LOW NITROGEN"
+        )
+
         recommendations.append(
             "Apply Nitrogen fertilizer"
         )
 
     elif n > HIGH_N:
 
-        notifications.append("HIGH NITROGEN")
+        notifications.append(
+            "HIGH NITROGEN"
+        )
+
         recommendations.append(
             "Reduce Nitrogen fertilizer"
         )
 
     else:
-        notifications.append("NORMAL NITROGEN")
 
+        notifications.append(
+            "NORMAL NITROGEN"
+        )
+
+    # =====================================================
     # P
+    # =====================================================
+
     if p < LOW_P:
 
-        notifications.append("LOW PHOSPHORUS")
+        notifications.append(
+            "LOW PHOSPHORUS"
+        )
+
         recommendations.append(
             "Apply Phosphorus fertilizer"
         )
 
     elif p > HIGH_P:
 
-        notifications.append("HIGH PHOSPHORUS")
+        notifications.append(
+            "HIGH PHOSPHORUS"
+        )
+
         recommendations.append(
             "Reduce Phosphorus fertilizer"
         )
 
     else:
-        notifications.append("NORMAL PHOSPHORUS")
 
+        notifications.append(
+            "NORMAL PHOSPHORUS"
+        )
+
+    # =====================================================
     # K
+    # =====================================================
+
     if k < LOW_K:
 
-        notifications.append("LOW POTASSIUM")
+        notifications.append(
+            "LOW POTASSIUM"
+        )
+
         recommendations.append(
             "Apply Potassium fertilizer"
         )
 
     elif k > HIGH_K:
 
-        notifications.append("HIGH POTASSIUM")
+        notifications.append(
+            "HIGH POTASSIUM"
+        )
+
         recommendations.append(
             "Reduce Potassium fertilizer"
         )
 
     else:
-        notifications.append("NORMAL POTASSIUM")
+
+        notifications.append(
+            "NORMAL POTASSIUM"
+        )
+
+    # =====================================================
+    # SOIL STATUS
+    # =====================================================
 
     if (
         LOW_N <= n <= HIGH_N and
         LOW_P <= p <= HIGH_P and
         LOW_K <= k <= HIGH_K
     ):
+
         soil_status = "SOIL HEALTHY"
 
     else:
+
         soil_status = "SOIL NEEDS ATTENTION"
 
     return {
-        "notifications": notifications,
-        "recommendations": recommendations,
-        "soil_status": soil_status
+
+        "notifications":
+            notifications,
+
+        "recommendations":
+            recommendations,
+
+        "soil_status":
+            soil_status
     }
 
 # =========================================================
-# SENSOR READ
+# READ SENSOR
 # =========================================================
 
 def read_npk_sensor():
@@ -281,22 +353,36 @@ def read_npk_sensor():
 
         if len(response) == 11:
 
-            n = (response[3] << 8) | response[4]
-            p = (response[5] << 8) | response[6]
-            k = (response[7] << 8) | response[8]
+            n = (
+                response[3] << 8
+            ) | response[4]
+
+            p = (
+                response[5] << 8
+            ) | response[6]
+
+            k = (
+                response[7] << 8
+            ) | response[8]
 
             return {
+
                 "n": n,
                 "p": p,
                 "k": k,
-                "time": datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+
+                "time":
+                    datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
             }
 
     except Exception as e:
 
-        print("SENSOR ERROR:", e)
+        print(
+            "SENSOR ERROR:",
+            e
+        )
 
     return None
 
@@ -321,11 +407,16 @@ async def sensor_loop():
 
             if data:
 
-                latest_sensor_data = NPKData(**data)
+                latest_sensor_data = (
+                    NPKData(**data)
+                )
 
-                result = check_npk_status(data)
+                result = check_npk_status(
+                    data
+                )
 
                 payload = {
+
                     "sensor_data":
                         latest_sensor_data.dict(),
 
@@ -343,7 +434,10 @@ async def sensor_loop():
 
         except Exception as e:
 
-            print("SENSOR LOOP ERROR:", e)
+            print(
+                "SENSOR LOOP ERROR:",
+                e
+            )
 
         await asyncio.sleep(2)
 
@@ -390,7 +484,9 @@ async def lifespan(app: FastAPI):
 
     except asyncio.CancelledError:
 
-        print("Sensor Loop Stopped")
+        print(
+            "Sensor Loop Stopped"
+        )
 
 app.router.lifespan_context = lifespan
 
@@ -412,15 +508,25 @@ def health():
 @app.get("/sensor")
 def get_sensor():
 
-    sensor = latest_sensor_data.model_dump()
+    sensor = latest_sensor_data.dict()
 
-    result = check_npk_status(sensor)
+    result = check_npk_status(
+        sensor
+    )
 
     return {
-        "sensor_data": sensor,
-        "notifications": result["notifications"],
-        "recommendations": result["recommendations"],
-        "soil_status": result["soil_status"]
+
+        "sensor_data":
+            sensor,
+
+        "notifications":
+            result["notifications"],
+
+        "recommendations":
+            result["recommendations"],
+
+        "soil_status":
+            result["soil_status"]
     }
 
 # =========================================================
@@ -434,15 +540,25 @@ async def sensor_stream():
 
         while True:
 
-            sensor = latest_sensor_data.model_dump()
+            sensor = latest_sensor_data.dict()
 
-            result = check_npk_status(sensor)
+            result = check_npk_status(
+                sensor
+            )
 
             payload = {
-                "sensor_data": sensor,
-                "notifications": result["notifications"],
-                "recommendations": result["recommendations"],
-                "soil_status": result["soil_status"]
+
+                "sensor_data":
+                    sensor,
+
+                "notifications":
+                    result["notifications"],
+
+                "recommendations":
+                    result["recommendations"],
+
+                "soil_status":
+                    result["soil_status"]
             }
 
             yield (
@@ -461,7 +577,9 @@ async def sensor_stream():
 # =========================================================
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(
+    websocket: WebSocket
+):
 
     await websocket.accept()
 
@@ -478,144 +596,155 @@ async def websocket_endpoint(websocket: WebSocket):
         clients.discard(websocket)
 
 # =========================================================
-# SENSOR SUPPORT
+# HYBRID FUSION
 # =========================================================
 
-def evaluate_sensor_support(
+def hybrid_fusion(
     predicted_class,
+    cnn_confidence,
     sensor
 ):
+
+    final_conf = cnn_confidence
 
     n = sensor["n"]
     p = sensor["p"]
     k = sensor["k"]
 
-    score = 0.5
+    # =====================================================
+    # N
+    # =====================================================
 
     if predicted_class == "n":
 
-        if n < 20:
-            score = 0.75
+        if n < 15:
 
-        elif n > 40:
-            score = 0.30
+            final_conf += 0.10
 
-        else:
-            score = 0.95
+        elif n > 35:
+
+            final_conf -= 0.25
+
+    # =====================================================
+    # P
+    # =====================================================
 
     elif predicted_class == "p":
 
         if p < 10:
-            score = 0.75
 
-        elif p > 20:
-            score = 0.30
+            final_conf += 0.10
 
-        else:
-            score = 0.95
+        elif p > 25:
+
+            final_conf -= 0.25
+
+    # =====================================================
+    # K
+    # =====================================================
 
     elif predicted_class == "k":
 
         if k < 20:
-            score = 0.75
 
-        elif k > 40:
-            score = 0.30
+            final_conf += 0.10
 
-        else:
-            score = 0.95
+        elif k > 45:
+
+            final_conf -= 0.25
+
+    # =====================================================
+    # HEALTHY
+    # =====================================================
 
     elif predicted_class == "healthy":
 
         if (
-            10 <= n <= 25 and
+            15 <= n <= 25 and
             10 <= p <= 20 and
             20 <= k <= 40
         ):
-            score = 0.95
+
+            final_conf += 0.10
 
         else:
-            score = 0.40
 
-    return score
+            final_conf -= 0.20
 
-# =========================================================
-# HYBRID FUSION
-# =========================================================
+    # =====================================================
+    # LIMIT
+    # =====================================================
 
-def hybrid_fusion(
-    cnn_class,
-    cnn_confidence,
-    sensor_data
-):
-
-    sensor_support = evaluate_sensor_support(
-        cnn_class,
-        sensor_data
+    final_conf = max(
+        0.0,
+        min(final_conf, 1.0)
     )
 
-    if cnn_confidence > 0.90:
+    # =====================================================
+    # STATUS
+    # =====================================================
 
-        cnn_weight = 0.85
-        sensor_weight = 0.15
+    if final_conf >= 0.90:
+
+        status = "VERY STRONG"
+
+    elif final_conf >= 0.75:
+
+        status = "STRONG"
+
+    elif final_conf >= 0.60:
+
+        status = "MODERATE"
 
     else:
 
-        cnn_weight = 0.70
-        sensor_weight = 0.30
-
-    final_confidence = (
-        cnn_confidence * cnn_weight
-    ) + (
-        sensor_support * sensor_weight
-    )
-
-    if final_confidence >= 0.85:
-
-        status = "STRONG DETECTION"
-
-    elif final_confidence >= 0.60:
-
-        status = "MODERATE DETECTION"
-
-    else:
-
-        status = "WEAK DETECTION"
+        status = "WEAK"
 
     return {
-        "cnn_confidence": cnn_confidence,
-        "sensor_support": sensor_support,
-        "final_confidence": final_confidence,
-        "status": status
+
+        "final_confidence":
+            final_conf,
+
+        "status":
+            status
     }
 
 # =========================================================
-# GRAD CAM
+# GENERATE GRADCAM
 # =========================================================
 
-def generate_gradcam(model, img_array):
+def generate_gradcam(
+    model,
+    img_array
+):
 
     grad_model = tf.keras.models.Model(
+
         [model.inputs],
+
         [
             model.get_layer(
                 LAST_CONV_LAYER
             ).output,
+
             model.output
         ]
     )
 
     with tf.GradientTape() as tape:
 
-        conv_outputs, predictions = grad_model(
-            img_array
+        conv_outputs, predictions = (
+            grad_model(img_array)
         )
 
         predicted_idx = tf.argmax(
             predictions[0]
         )
 
-        loss = predictions[:, predicted_idx]
+        loss = predictions[
+            :,
+            predicted_idx
+        ]
 
     grads = tape.gradient(
         loss,
@@ -630,16 +759,23 @@ def generate_gradcam(model, img_array):
     conv_outputs = conv_outputs[0]
 
     heatmap = tf.reduce_sum(
+
         tf.multiply(
             pooled_grads,
             conv_outputs
         ),
+
         axis=-1
     )
 
-    heatmap = tf.maximum(heatmap, 0)
+    heatmap = tf.maximum(
+        heatmap,
+        0
+    )
 
-    max_heat = tf.reduce_max(heatmap)
+    max_heat = tf.reduce_max(
+        heatmap
+    )
 
     if max_heat == 0:
         return None
@@ -654,6 +790,7 @@ def generate_gradcam(model, img_array):
 
 @app.post("/predict")
 async def predict(
+
     files: list[UploadFile] = File(...)
 ):
 
@@ -665,9 +802,9 @@ async def predict(
 
         for file in files:
 
-            # =============================================
-            # VALIDATION
-            # =============================================
+            # =================================================
+            # VALIDATE
+            # =================================================
 
             if (
                 file.content_type
@@ -683,14 +820,16 @@ async def predict(
             if len(img_bytes) > MAX_FILE_SIZE:
 
                 return {
+
                     "success": False,
+
                     "error":
-                    "Image too large"
+                        "Image too large"
                 }
 
-            # =============================================
-            # IMAGE LOAD
-            # =============================================
+            # =================================================
+            # LOAD IMAGE
+            # =================================================
 
             try:
 
@@ -702,16 +841,19 @@ async def predict(
 
                 continue
 
-            image = image.resize((224, 224))
+            image = image.resize(
+                (224, 224)
+            )
 
             img_np = np.array(image)
 
-            # =============================================
+            # =================================================
             # PREPROCESS
-            # =============================================
+            # =================================================
 
             img_array = (
-                img_np.astype("float32") / 255.0
+                img_np.astype("float32")
+                / 255.0
             )
 
             img_batch = np.expand_dims(
@@ -719,18 +861,23 @@ async def predict(
                 axis=0
             )
 
-            # =============================================
-            # INFERENCE
-            # =============================================
+            # =================================================
+            # PREDICT
+            # =================================================
 
             loop = asyncio.get_running_loop()
 
             preds = await loop.run_in_executor(
+
                 None,
-                lambda: infer(img_batch).numpy()
+
+                lambda:
+                    infer(img_batch).numpy()
             )
 
-            idx = np.argmax(preds[0])
+            idx = np.argmax(
+                preds[0]
+            )
 
             cls = CLASS_NAMES[idx]
 
@@ -742,9 +889,9 @@ async def predict(
 
             confidences.append(conf)
 
-            # =============================================
+            # =================================================
             # GRADCAM
-            # =============================================
+            # =================================================
 
             heatmap = generate_gradcam(
                 MODEL,
@@ -754,7 +901,9 @@ async def predict(
             if heatmap is not None:
 
                 heatmap = cv2.resize(
+
                     heatmap,
+
                     (
                         img_np.shape[1],
                         img_np.shape[0]
@@ -774,20 +923,25 @@ async def predict(
 
                 superimposed = (
                     cv2.addWeighted(
+
                         img_np,
                         0.65,
+
                         heatmap_color,
                         0.35,
+
                         0
                     )
                 )
 
-                # =========================================
-                # SAVE
-                # =========================================
+                # =============================================
+                # SAVE IMAGE
+                # =============================================
 
-                timestamp = datetime.now().strftime(
-                    "%Y%m%d_%H%M%S_%f"
+                timestamp = (
+                    datetime.now().strftime(
+                        "%Y%m%d_%H%M%S_%f"
+                    )
                 )
 
                 filename = (
@@ -811,9 +965,11 @@ async def predict(
 
                 heatmaps.append({
 
-                    "class": cls,
+                    "class":
+                        cls,
 
-                    "confidence": conf,
+                    "confidence":
+                        conf,
 
                     "heatmap_url":
                         f"/heatmaps/{filename}",
@@ -822,21 +978,23 @@ async def predict(
                         save_path
                 })
 
-        # =================================================
-        # NO VALID PREDICTION
-        # =================================================
+        # =====================================================
+        # NO VALID IMAGE
+        # =====================================================
 
         if not predictions:
 
             return {
+
                 "success": False,
+
                 "error":
-                "No valid image uploaded"
+                    "No valid image uploaded"
             }
 
-        # =================================================
+        # =====================================================
         # MAJORITY VOTE
-        # =================================================
+        # =====================================================
 
         final_class = Counter(
             predictions
@@ -847,29 +1005,26 @@ async def predict(
             / len(confidences)
         )
 
-        # =================================================
-        # SENSOR + HYBRID
-        # =================================================
+        # =====================================================
+        # SENSOR DATA
+        # =====================================================
 
-        sensor_data = (
-            latest_sensor_data
-            .model_copy()
-            .model_dump()
-        )
+        sensor_data = latest_sensor_data.dict()
 
         threshold = check_npk_status(
             sensor_data
         )
 
         fusion = hybrid_fusion(
+
             final_class,
             avg_conf,
             sensor_data
         )
 
-        # =================================================
+        # =====================================================
         # RESPONSE
-        # =================================================
+        # =====================================================
 
         return {
 
@@ -883,9 +1038,6 @@ async def predict(
 
             "sensor_data":
                 sensor_data,
-
-            "sensor_support":
-                fusion["sensor_support"],
 
             "final_confidence":
                 fusion["final_confidence"],
@@ -911,7 +1063,9 @@ async def predict(
         traceback.print_exc()
 
         return {
+
             "success": False,
+
             "error": str(e)
         }
 

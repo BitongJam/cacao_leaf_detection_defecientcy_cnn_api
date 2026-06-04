@@ -248,10 +248,10 @@ class WTResidualBlock(tf.keras.layers.Layer):
 # MODEL LOAD & CONFIGURATION
 # =========================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parents[2]
 MODEL_PATH = BASE_DIR / "models" / "wt_resnet_cacao.keras"
 
-print("Loading model...")
+print(f"Loading model from {MODEL_PATH}...")
 try:
     MODEL = tf.keras.models.load_model(
         MODEL_PATH,
@@ -382,7 +382,7 @@ def predict_image(image: Image.Image):
 
     import pywt
 
-    image = image.resize((112, 448))
+    image = image.resize((224, 224))
     arr = np.array(image).astype("float32")
 
     # normalize if training used it
@@ -390,14 +390,15 @@ def predict_image(image: Image.Image):
 
     def wavelet_transform(img):
         coeffs = []
-        for c in range(3):
-            cA, (cH, cV, cD) = pywt.dwt2(img[:, :, c], 'haar')
-            coeffs.extend([cA, cH, cV, cD])
+        for channel in range(img.shape[-1]):
+            cA, (cH, cV, cD) = pywt.dwt2(img[:, :, channel], 'haar')
+            merged = np.concatenate([cA, cH, cV, cD], axis=1)
+            coeffs.append(merged)
         return np.stack(coeffs, axis=-1)
 
     arr = wavelet_transform(arr)
 
-    print("DEBUG SHAPE:", arr.shape)  # MUST be (56, 224, 12)
+    print("DEBUG SHAPE:", arr.shape)  # Should be (112, 448, 3)
 
     batch = np.expand_dims(arr, 0)
 

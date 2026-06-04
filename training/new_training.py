@@ -4,6 +4,7 @@ from tensorflow.keras import layers
 from tensorflow.keras.models import Model
 import pywt
 import os
+from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report
 
@@ -79,6 +80,7 @@ train_ds = train_ds.map(
 # WAVELET LAYER
 # =========================================================
 
+@tf.keras.utils.register_keras_serializable()
 class WaveletLayer(layers.Layer):
 
     def __init__(self):
@@ -119,14 +121,20 @@ class WaveletLayer(layers.Layer):
 
         return output
 
+    def get_config(self):
+        config = super(WaveletLayer, self).get_config()
+        return config
+
 # =========================================================
 # WT RESIDUAL BLOCK
 # =========================================================
 
+@tf.keras.utils.register_keras_serializable()
 class WTResidualBlock(layers.Layer):
 
     def __init__(self, filters):
         super(WTResidualBlock, self).__init__()
+        self.filters = filters
 
         self.conv1 = layers.Conv2D(filters, 3, padding='same')
         self.bn1 = layers.BatchNormalization()
@@ -256,8 +264,10 @@ print(classification_report(y_true, y_pred, target_names=class_names))
 # SAVE MODEL
 # =========================================================
 
-os.makedirs("./models", exist_ok=True)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+model_dir = ROOT_DIR / "models"
+model_dir.mkdir(parents=True, exist_ok=True)
 
-model.save("./models/wt_resnet_cacao.keras")
+model.save(model_dir / "wt_resnet_cacao.keras")
 
-print("WT-ResNet model saved")
+print(f"WT-ResNet model saved to {model_dir / 'wt_resnet_cacao.keras'}")

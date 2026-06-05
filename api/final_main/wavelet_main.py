@@ -419,7 +419,6 @@ def predict_image(image: Image.Image):
 # =========================================================
 # API ENDPOINTS
 # =========================================================
-
 @app.post("/predict")
 async def predict(files: list[UploadFile] = File(...)):
     if not files:
@@ -428,44 +427,187 @@ async def predict(files: list[UploadFile] = File(...)):
     results = []
     predictions = []
 
+    # 🌱 Agriculture scoring system (confidence-weighted)
+    npk_scores = {"n": 0.0, "p": 0.0, "k": 0.0}
+
     for file in files:
         try:
             contents = await file.read()
-            # Pwersahon nga RGB aron malikayan ang PNG alpha-channel error (4 channels)
             img = Image.open(io.BytesIO(contents)).convert("RGB")
 
-            # Paggamit sa lock para sa dungan nga mga request (luwas sa memory crash)
             async with prediction_lock:
                 cls, conf, heatmap_data = predict_image(img)
 
             predictions.append(cls)
 
+            # store per image result
             results.append({
                 "filename": file.filename,
                 "cnn_class": cls,
                 "cnn_confidence": round(conf, 4),
-                "heatmap": heatmap_data  # Base64 string data URI
+                "heatmap": heatmap_data
             })
+
+            # 🌱 weighted scoring (only NPK classes)
+            if cls in ["n", "p", "k"]:
+                npk_scores[cls] += conf
+
         except Exception as e:
             results.append({
                 "filename": file.filename,
-                "error": f"Dili maproseso ang imahe: {str(e)}"
+                "error": str(e)
             })
 
-    # Majority voting logic para sa kinatibuk-ang diagnosis
-    valid_predictions = [p for p in predictions if p != "uncertain"]
+    # =====================================================
+    # FILTER VALID PREDICTIONS
+    # =====================================================
+    valid_predictions = [p for p in predictions if p in ["n", "p", "k"]]
+
+    # =====================================================
+    # NORMALIZE SCORES (0–1)
+    # =====================================================
+    total = sum(npk_scores.values())
+
+    if total > 0:
+        normalized = {k: v / total for k, v in npk_scores.items()}
+    else:
+        normalized = npk_scores
+
+    # =====================================================
+    # CONVERT TO PERCENTAGE (for farmers)
+    # =====================================================
+    percent = {
+        k.upper(): round(v * 100, 2) for k, v in normalized.items()
+    }
+
+    # =====================================================
+    # SMART AGRICULTURE DECISION LOGIC
+    # =====================================================
+    values = normalized
+    max_val = max(values.values()) if values else 0
+    min_val = min(values.values()) if values else 0
+
+    primary = max(values, key=values.get).upper() if values else None
+
+    low_nutrients = [
+        k.upper() for k, v in values.items() if v < 0.3
+    ]
+
+    # =====================================================
+    # FINAL DECISION (AGRICULTURE-GRADE)
+    # =====================================================
+    if len(valid_predictions) == 0:
+        final_decision = {
+            "status": "no_valid_leaf_detected",
+            "message": "No valid plant leaf detected",
+            "npk_levels": percent
+        }
+
+    elif max_val - min_val < 0.15:
+        final_decision = {
+            "status": "mixed_deficiency",
+            "message": "Multiple nutrient imbalance detected",
+            "npk_levels": percent
+        }
+
+    else:
+        final_decision = {
+            "status": f"{primary}_deficiency",
+            "message": f"{primary} is the most deficient nutrient",
+
+            "npk_levels": percent,
+
+            "details": {
+                "primary_deficiency": {
+                    "nutrient": primary,
+                    "score": round(values[primary.lower()], 4),
+                    "percentage": percent[primary]
+                },
+
+                "low_nutrients": [
+                    {
+                        "nutrient": n,
+                        "percentage": percent[n]
+                    }
+                    for n in low_nutrients
+                ]
+            }
+        }
+
+    # =====================================================
+    # OVERALL CLASS (kept from your system)
+    # =====================================================
     if valid_predictions:
         overall = Counter(valid_predictions).most_common(1)[0][0]
-    elif predictions:
-        overall = Counter(predictions).most_common(1)[0][0]
     else:
         overall = "unknown"
 
+    # =====================================================
+    # FINAL RESPONSE
+    # =====================================================
     return {
         "count": len(results),
+
+        # 🌱 main agriculture output
+        "npk_distribution_percent": percent,
+
+        "raw_scores": npk_scores,
+
+        "valid_count": len(valid_predictions),
+
+        "final_decision": final_decision,
+
         "overall_diagnosis": overall,
+
         "results": results
     }
+
+# @app.post("/predict")
+# async def predict(files: list[UploadFile] = File(...)):
+#     if not files:
+#         raise HTTPException(status_code=400, detail="Walay file nga nadawat.")
+
+#     results = []
+#     predictions = []
+
+#     for file in files:
+#         try:
+#             contents = await file.read()
+#             # Pwersahon nga RGB aron malikayan ang PNG alpha-channel error (4 channels)
+#             img = Image.open(io.BytesIO(contents)).convert("RGB")
+
+#             # Paggamit sa lock para sa dungan nga mga request (luwas sa memory crash)
+#             async with prediction_lock:
+#                 cls, conf, heatmap_data = predict_image(img)
+
+#             predictions.append(cls)
+
+#             results.append({
+#                 "filename": file.filename,
+#                 "cnn_class": cls,
+#                 "cnn_confidence": round(conf, 4),
+#                 "heatmap": heatmap_data  # Base64 string data URI
+#             })
+#         except Exception as e:
+#             results.append({
+#                 "filename": file.filename,
+#                 "error": f"Dili maproseso ang imahe: {str(e)}"
+#             })
+
+#     # Majority voting logic para sa kinatibuk-ang diagnosis
+#     valid_predictions = [p for p in predictions if p != "uncertain"]
+#     if valid_predictions:
+#         overall = Counter(valid_predictions).most_common(1)[0][0]
+#     elif predictions:
+#         overall = Counter(predictions).most_common(1)[0][0]
+#     else:
+#         overall = "unknown"
+
+#     return {
+#         "count": len(results),
+#         "overall_diagnosis": overall,
+#         "results": results
+#     }
 
 # =========================================================
 # SENSOR & WEBSOCKET PLACEHOLDERS

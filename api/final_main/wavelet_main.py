@@ -384,6 +384,8 @@ async def predict(files: list[UploadFile] = File(...)):
 
     results = []
     predictions = []
+
+    # Agriculture scoring system (confidence-weighted)
     npk_scores = {"n": 0.0, "p": 0.0, "k": 0.0}
 
     for file in files:
@@ -391,17 +393,54 @@ async def predict(files: list[UploadFile] = File(...)):
             contents = await file.read()
             img = Image.open(io.BytesIO(contents)).convert("RGB")
 
+            # 1. Siguroha ang sakto nga pag-preprocess (Resize + Float)
+            img_resized = img.resize((224, 224))
+            arr = np.array(img_resized).astype(np.float32)
+
+            # CRITICAL FIX: I-uncomment kini kung gi-train nimo ang model nga naay /255.0
+            # Kung dili gihapon mo-work, i-comment ra pud og balik.
+            arr = arr / 255.0 
+
+            batch = np.expand_dims(arr, axis=0)
+
             async with prediction_lock:
-                cls, conf, heatmap_data = predict_image(img)
+                # Direct prediction gikan sa imong WT-ResNet
+                preds = MODEL.predict(batch, verbose=0)
+                
+                # I-print sa terminal para sa debugging aron makita ang raw outputs
+                print(f"DEBUG [{file.filename}] Raw Model Outputs:", preds[0])
+
+                idx = np.argmax(preds[0])
+                conf = float(preds[0][idx])
+
+            cls = CLASS_NAMES[idx]
+
+            # I-override kung ubos sa threshold
+            if conf < CONF_THRESHOLD:
+                cls = "uncertain"
 
             predictions.append(cls)
+
+            # Grad-CAM Generation
+            heatmap_data = None
+            try:
+                if LAST_CONV_LAYER_NAME and cls != "uncertain":
+                    # Gamiton ang function nga nag-compute sa gradcam
+                    h_map = get_gradcam_heatmap(batch, MODEL, LAST_CONV_LAYER_NAME, idx)
+                    heatmap_data = f"data:image/jpeg;base64,{apply_heatmap(img_resized, h_map)}"
+            except Exception as e:
+                print(f"Grad-CAM error for {file.filename}: {e}")
+
+            # Store per image result
             results.append({
                 "filename": file.filename,
                 "cnn_class": cls,
                 "cnn_confidence": round(conf, 4),
-                "heatmap": heatmap_data
+                "heatmap": heatmap_data,
+                "all_probabilities": {CLASS_NAMES[i]: float(preds[0][i]) for i in range(len(CLASS_NAMES))}
             })
 
+            # Butangan lang og score kung NPK classes ug dili uncertain
             if cls in ["n", "p", "k"]:
                 npk_scores[cls] += conf
 
@@ -411,22 +450,36 @@ async def predict(files: list[UploadFile] = File(...)):
                 "error": str(e)
             })
 
+    # =====================================================
+    # FILTER VALID PREDICTIONS & DECISION LOGIC
+    # =====================================================
     valid_predictions = [p for p in predictions if p in ["n", "p", "k"]]
     total = sum(npk_scores.values())
-    normalized = {k: (v / total if total > 0 else 0.0) for k, v in npk_scores.items()}
+
+    if total > 0:
+        normalized = {k: v / total for k, v in npk_scores.items()}
+    else:
+        # KINI ANG SALO KUNG zero tanan ang score aron dili mag-bug
+        normalized = {"n": 0.0, "p": 0.0, "k": 0.0}
+
     percent = {k.upper(): round(v * 100, 2) for k, v in normalized.items()}
 
     values = normalized
     max_val = max(values.values()) if values else 0
     min_val = min(values.values()) if values else 0
 
-    primary = max(values, key=lambda k: values[k]).upper() if total > 0 else "N"
+    # Kung naay valid prediction, pangitaa ang primary deficiency
+    if total > 0:
+        primary = max(values, key=lambda k: values[k]).upper()
+    else:
+        primary = "UNKNOWN"
+
     low_nutrients = [k.upper() for k, v in values.items() if v < 0.3]
 
     if len(valid_predictions) == 0:
         final_decision = {
             "status": "no_valid_leaf_detected",
-            "message": "No valid plant leaf detected",
+            "message": "No valid cacao nutrient deficiency detected (or image is healthy/not_cacao)",
             "npk_levels": percent
         }
     elif max_val - min_val < 0.15:
@@ -438,7 +491,7 @@ async def predict(files: list[UploadFile] = File(...)):
     else:
         final_decision = {
             "status": f"{primary}_deficiency",
-            "message": f"{primary} is the most deficient nutrient",
+            "message": f"{primary} deficiency is highly prominent",
             "npk_levels": percent,
             "details": {
                 "primary_deficiency": {
@@ -446,20 +499,23 @@ async def predict(files: list[UploadFile] = File(...)):
                     "score": round(values[primary.lower()], 4),
                     "percentage": percent[primary]
                 },
-                "low_nutrients": [
-                    {"nutrient": n, "percentage": percent[n]} for n in low_nutrients
-                ]
+                "low_nutrients": [{"nutrient": n, "percentage": percent[n]} for n in low_nutrients if n != primary]
             }
         }
 
-    overall = Counter(valid_predictions).most_common(1)[0][0] if valid_predictions else "unknown"
+    if valid_predictions:
+        overall = Counter(valid_predictions).most_common(1)[0][0]
+    else:
+        # Tan-awon kung unsa ang pinaka-gawas sa uban nga classes (healthy / not_cacao)
+        valid_all = [p for p in predictions if p != "uncertain"]
+        overall = Counter(valid_all).most_common(1)[0][0] if valid_all else "unknown"
 
     return {
         "count": len(results),
         "npk_distribution_percent": percent,
         "raw_scores": npk_scores,
         "valid_count": len(valid_predictions),
-        "final_decision": final_decision,
+        "final_decision": final_decision,g
         "overall_diagnosis": overall,
         "results": results
     }

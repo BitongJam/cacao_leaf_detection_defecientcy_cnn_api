@@ -21,20 +21,16 @@ import random
 # APP SETUP
 # =========================================================
 
-# Sensor data storage
 latest_sensor = {
     "n": 0,
     "p": 0,
     "k": 0,
-    "timestamp": None
+    "timestamp": None,
+    "recommendation": None
 }
 
 clients = set()
 
-# =========================================================
-# SENSOR THRESHOLDS & RECOMMENDATION
-# =========================================================
-# Define desired ranges for NPK (min, max). Values outside range will trigger recommendations.
 SENSOR_THRESHOLDS = {
     "n": {"min": 20, "max": 60},
     "p": {"min": 15, "max": 50},
@@ -42,10 +38,6 @@ SENSOR_THRESHOLDS = {
 }
 
 def compute_recommendation(sensor_values: dict) -> dict:
-    """Return simple recommendations based on SENSOR_THRESHOLDS.
-
-    Output example: {"recommendations": ["Increase N...", "P OK", ...]}.
-    """
     recs = []
     for nutrient in ("n", "p", "k"):
         try:
@@ -66,7 +58,6 @@ def compute_recommendation(sensor_values: dict) -> dict:
         else:
             recs.append(f"{nutrient.upper()} OK (in range)")
 
-    # Fertilizer suggestions (general guidance)
     fert_recs = []
     if any("Increase N" in r for r in recs):
         fert_recs.append({
@@ -104,11 +95,9 @@ def compute_recommendation(sensor_values: dict) -> dict:
     return {"recommendations": recs, "fertilizer_recommendations": fert_recs}
 
 async def sensor_loop():
-    """Background task to read NPK sensor values periodically"""
     global latest_sensor
     while True:
         try:
-            # Try to read from real sensor
             from sensor import get_npk_values
             n, p, k = get_npk_values()
             if n is not None:
@@ -118,12 +107,9 @@ async def sensor_loop():
                     "k": k,
                     "timestamp": datetime.now().isoformat()
                 }
-                # compute recommendation based on thresholds
                 latest_sensor["recommendation"] = compute_recommendation(latest_sensor)
                 print(f"Sensor: N={n}, P={p}, K={k}")
         except Exception as e:
-            # Fallback: simulate sensor data if real sensor fails
-            print(f"Sensor read error: {e}, using simulated values")
             latest_sensor = {
                 "n": random.randint(0, 100),
                 "p": random.randint(0, 100),
@@ -132,14 +118,12 @@ async def sensor_loop():
             }
             latest_sensor["recommendation"] = compute_recommendation(latest_sensor)
         
-        # Broadcast to WebSocket clients
         await broadcast_sensor_data()
-        await asyncio.sleep(5)  # Read every 5 seconds
+        await asyncio.sleep(5)
 
 async def broadcast_sensor_data():
-    """Send sensor data to all connected WebSocket clients"""
     disconnected = []
-    for ws in clients:
+    for ws in list(clients):
         try:
             await ws.send_json({"sensor": latest_sensor})
         except:
@@ -150,10 +134,8 @@ async def broadcast_sensor_data():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     sensor_task = asyncio.create_task(sensor_loop())
     yield
-    # Shutdown
     sensor_task.cancel()
 
 app = FastAPI(title="Cacao Disease Classifier with Grad-CAM", lifespan=lifespan)
@@ -175,81 +157,72 @@ class WaveletLayer(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+    def wavelet_np(self, img):
+        coeffs = []
+        for c in range(img.shape[-1]):
+            cA, (cH, cV, cD) = pywt.dwt2(img[:, :, c], "haar")
+            merged = np.concatenate([cA, cH, cV, cD], axis=1)
+            coeffs.append(merged)
+        out = np.stack(coeffs, axis=-1).astype(np.float32)
+        return out
+
     def call(self, inputs):
-
-        def wavelet_transform(img):
-            img = img.numpy()
-            coeffs = []
-
-            for channel in range(img.shape[-1]):
-                cA, (cH, cV, cD) = pywt.dwt2(img[:, :, channel], 'haar')
-
-                merged = np.concatenate([
-                    cA,
-                    cH,
-                    cV,
-                    cD
-                ], axis=1)
-
-                coeffs.append(merged)
-
-            coeffs = np.stack(coeffs, axis=-1)
-            return coeffs.astype(np.float32)
-
-        output = tf.map_fn(
-            lambda x: tf.py_function(
-                wavelet_transform,
-                [x],
+        def fn(x):
+            out = tf.py_function(
+                func=self.wavelet_np,
+                inp=[x],
                 Tout=tf.float32
-            ),
+            )
+            out.set_shape([112, 448, 3])
+            return out
+
+        return tf.map_fn(
+            fn,
             inputs,
-            fn_output_signature=tf.TensorSpec(shape=(112, 448, 3), dtype=tf.float32)
+            fn_output_signature=tf.TensorSpec(
+                shape=(112, 448, 3),
+                dtype=tf.float32
+            )
         )
 
-        return output
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], 112, 448, 3)
+
+    def get_config(self):
+        return super().get_config()
             
 @tf.keras.utils.register_keras_serializable()
 class WTResidualBlock(tf.keras.layers.Layer):
     def __init__(self, filters=32, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
-
         self.conv1 = tf.keras.layers.Conv2D(filters, 3, padding='same')
         self.bn1 = tf.keras.layers.BatchNormalization()
-
         self.conv2 = tf.keras.layers.Conv2D(filters, 3, padding='same')
         self.bn2 = tf.keras.layers.BatchNormalization()
-
         self.relu = tf.keras.layers.ReLU()
 
     def call(self, inputs):
-
         shortcut = inputs
-
         x = self.conv1(inputs)
         x = self.bn1(x)
         x = self.relu(x)
-
         x = self.conv2(x)
         x = self.bn2(x)
-
         x = x + shortcut
-
         x = self.relu(x)
-
         return x
 
     def get_config(self):
         config = super().get_config()
         config.update({"filters": self.filters})
         return config
-    
-    # =========================================================
+
+# =========================================================
 # MODEL LOAD & CONFIGURATION
 # =========================================================
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-MODEL_PATH = BASE_DIR / "models" / "wt_resnet_cacao.keras"
+MODEL_PATH = Path("/home/pi/Documents/cacao_project/models/wt_resnet_cacao.keras")
 
 print(f"Loading model from {MODEL_PATH}...")
 try:
@@ -266,16 +239,16 @@ except Exception as e:
     print(f"Error loading model from {MODEL_PATH}: {e}")
     raise e
 
-# Awtomatiko nga pangitaon ang kataposang convolutional layer para sa Grad-CAM.
-# Importante kini tungod kay ang ResNet adunay espesipikong ngalan sa mga layer.
+# Dynamic activation parsing for Grad-CAM
 LAST_CONV_LAYER_NAME = None
+GRAD_CAM_TARGET_LAYER = None
+GRAD_CAM_MODEL_BACKBONE = MODEL
+
 for layer in reversed(MODEL.layers):
-    # Mahimong anaa kini sa sulod sa usa ka functional sub-model (sama sa ResNet backbone)
     if isinstance(layer, tf.keras.Model):
         for sub_layer in reversed(layer.layers):
             if isinstance(sub_layer, tf.keras.layers.Conv2D) or "conv" in sub_layer.name.lower():
-                LAST_CONV_LAYER_NAME = f"{layer.name}.{sub_layer.name}"  # Path notation if nested
-                # Tipigi usab ang reference sa sulod nga layer para sa Grad-CAM model construction
+                LAST_CONV_LAYER_NAME = sub_layer.name
                 GRAD_CAM_TARGET_LAYER = sub_layer
                 GRAD_CAM_MODEL_BACKBONE = layer
                 break
@@ -289,16 +262,17 @@ for layer in reversed(MODEL.layers):
 
 print(f"Target layer selected for Heatmap: {LAST_CONV_LAYER_NAME}")
 
-# Warm-up (Gi-execute kausa aron paspas ang mosunod nga mga request sa Raspberry Pi)
-print("Warming up model...")
-dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
-_ = MODEL.predict(dummy, verbose=0)
-print("Warm-up complete!")
+try:
+    # Ang husto nga input visualization base sa imong predict_image function size
+    dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
+    _ = MODEL(dummy, training=False)
+    print("Warm-up complete!")
+except Exception as e:
+    print("Warm-up skipped:", e)
 
 CLASS_NAMES = ["n", "p", "k", "healthy", "not_cacao"]
 CONF_THRESHOLD = 0.70
 
-# Lock aron malikayan ang race conditions ug memory spike sa Raspberry Pi
 prediction_lock = asyncio.Lock()
 
 # =========================================================
@@ -307,62 +281,61 @@ prediction_lock = asyncio.Lock()
 
 def generate_heatmap(img_array, model, pred_index=None):
     """
-    Nag-compute sa Grad-CAM activation map ug mobalik og base64 image string.
+    Nagcompute sa husto nga Grad-CAM activation model bisan pa og functional sub-backbone ang gigamit.
     """
     try:
-        # Pagtukod og gradient model base kung asa nakit-an ang kataposang conv layer
-        if "GRAD_CAM_MODEL_BACKBONE" in globals() and GRAD_CAM_MODEL_BACKBONE != model:
-            # Kon ang conv layer naa sa sulod sa usa ka sub-model (e.g. ResNet backbone)
+        # Pagtukod sa husto nga internal reference model aron malikayan ang Graph Disconnected framework errors
+        if GRAD_CAM_MODEL_BACKBONE != model:
+            # Kon ang target convolution layer naa sa sulod sa sub-model backbone
             grad_model = tf.keras.models.Model(
                 inputs=[GRAD_CAM_MODEL_BACKBONE.inputs],
                 outputs=[GRAD_CAM_TARGET_LAYER.output, GRAD_CAM_MODEL_BACKBONE.output]
             )
-            
-            # Kinahanglan ipasa una ang imahe sa mga layer sa wala pa ang backbone kon duna man
-            # Alang sa kayano, kung ang modelo diretso ra, gamiton nato ang nag-unang lohika:
+            # Ipasa ang image array latas sa mga unang structures sa pangunang modelo hangtod makasulod sa backbone
+            # Para sa kasagaran nga architectures, i-extract ang internal state input:
+            backbone_input = model.layers[1](img_array) if len(model.layers) > 1 else img_array
+            # Kon ang input naay branching, i-extract ang layer outputs directly
+            for l in model.layers:
+                if l == GRAD_CAM_MODEL_BACKBONE:
+                    break
+                img_array = l(img_array)
+            conv_img_input = img_array
         else:
             grad_model = tf.keras.models.Model(
                 inputs=[model.inputs],
                 outputs=[model.get_layer(LAST_CONV_LAYER_NAME).output, model.output]
             )
+            conv_img_input = img_array
 
-        # Pagkuha sa gradients gamit ang GradientTape
         with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(img_array)
+            conv_outputs, predictions = grad_model(conv_img_input)
             if pred_index is None:
                 pred_index = tf.argmax(predictions[0])
             class_channel = predictions[:, pred_index]
 
-        # Gradients sa target class counter-bahin sa conv layer feature map
         grads = tape.gradient(class_channel, conv_outputs)
-
-        # I-average ang gradients matag channel (Global Average Pooling)
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-        # I-multiply ang feature map sa iyang ka-importante
         conv_outputs = conv_outputs[0]
-        pooled_grads = tf.expand_dims(pooled_grads, axis=-1)
+        pooled_grads = pooled_grads[np.newaxis, np.newaxis, :]
+        
         heatmap = tf.reduce_sum(conv_outputs * pooled_grads, axis=-1)
-
-        # ReLU ug Normalization
         heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon())
         heatmap = heatmap.numpy()
 
-        # Pag-andam sa orihinal nga imahe (I-convert gikan sa float input format ngadto sa uint8)
-        orig_img = img_array[0].astype(np.uint8)
+        # Siguradohon nga uint8 ang configuration parameters
+        orig_img = img_array[0].numpy() if tf.is_tensor(img_array) else img_array[0]
+        orig_img = np.clip(orig_img, 0, 255).astype(np.uint8)
         
-        # I-resize ang heatmap aron maparehas sa sukod sa input image (224x224)
+        # I-resize ang heatmap pabalik sa configuration geometry structure sa original system image
         heatmap_resized = cv2.resize(heatmap, (orig_img.shape[1], orig_img.shape[0]))
+        heatmap_uint8 = np.uint8(255 * heatmap_resized)
         
-        # I-convert ang heatmap ngadto sa usa ka Color Map (JET color map para sa rainbow-effect)
-        heatmap_uint8 = np.ascontiguousarray(np.uint8(255 * heatmap_resized))
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
 
-        # I-overlay ang heatmap ngadto sa orihinal nga hulagway (60% orig, 40% heatmap)
         superimposed_img = cv2.addWeighted(orig_img, 0.6, heatmap_color, 0.4, 0)
 
-        # I-encode ang imahe ngadto sa Base64 string para dali gamiton sa Frontend
         pil_img = Image.fromarray(superimposed_img)
         buffered = io.BytesIO()
         pil_img.save(buffered, format="JPEG")
@@ -371,48 +344,33 @@ def generate_heatmap(img_array, model, pred_index=None):
         return f"data:image/jpeg;base64,{img_str}"
         
     except Exception as e:
-        print(f"Grad-CAM failed: {e}. Returning None for heatmap.")
+        print(f"Grad-CAM execution failure matrix: {e}")
         return None
-    
-    # =========================================================
+
+# =========================================================
 # PREDICTION CORE FUNCTION
 # =========================================================
-
 def predict_image(image: Image.Image):
-
-    import pywt
-
     image = image.resize((224, 224))
-    arr = np.array(image).astype("float32")
+    arr = np.array(image).astype(np.float32)
+    batch = np.expand_dims(arr, axis=0)
 
-    # normalize if training used it
-    # arr = arr / 255.0
-
-    def wavelet_transform(img):
-        coeffs = []
-        for channel in range(img.shape[-1]):
-            cA, (cH, cV, cD) = pywt.dwt2(img[:, :, channel], 'haar')
-            merged = np.concatenate([cA, cH, cV, cD], axis=1)
-            coeffs.append(merged)
-        return np.stack(coeffs, axis=-1)
-
-    arr = wavelet_transform(arr)
-
-    print("DEBUG SHAPE:", arr.shape)  # Should be (112, 448, 3)
-
-    batch = np.expand_dims(arr, 0)
-
+    print("INPUT SHAPE:", batch.shape)
     preds = MODEL.predict(batch, verbose=0)
+
     idx = np.argmax(preds[0])
     conf = float(np.max(preds[0]))
-
     cls = CLASS_NAMES[idx]
+
     if conf < CONF_THRESHOLD:
         cls = "uncertain"
 
     heatmap = None
-    if LAST_CONV_LAYER_NAME:
-        heatmap = generate_heatmap(batch, MODEL, idx)
+    try:
+        if LAST_CONV_LAYER_NAME:
+            heatmap = generate_heatmap(batch, MODEL, idx)
+    except Exception as e:
+        print("Grad-CAM error hook:", e)
 
     return cls, conf, heatmap
 
@@ -426,8 +384,6 @@ async def predict(files: list[UploadFile] = File(...)):
 
     results = []
     predictions = []
-
-    # 🌱 Agriculture scoring system (confidence-weighted)
     npk_scores = {"n": 0.0, "p": 0.0, "k": 0.0}
 
     for file in files:
@@ -439,8 +395,6 @@ async def predict(files: list[UploadFile] = File(...)):
                 cls, conf, heatmap_data = predict_image(img)
 
             predictions.append(cls)
-
-            # store per image result
             results.append({
                 "filename": file.filename,
                 "cnn_class": cls,
@@ -448,7 +402,6 @@ async def predict(files: list[UploadFile] = File(...)):
                 "heatmap": heatmap_data
             })
 
-            # 🌱 weighted scoring (only NPK classes)
             if cls in ["n", "p", "k"]:
                 npk_scores[cls] += conf
 
@@ -458,174 +411,65 @@ async def predict(files: list[UploadFile] = File(...)):
                 "error": str(e)
             })
 
-    # =====================================================
-    # FILTER VALID PREDICTIONS
-    # =====================================================
     valid_predictions = [p for p in predictions if p in ["n", "p", "k"]]
-
-    # =====================================================
-    # NORMALIZE SCORES (0–1)
-    # =====================================================
     total = sum(npk_scores.values())
+    normalized = {k: (v / total if total > 0 else 0.0) for k, v in npk_scores.items()}
+    percent = {k.upper(): round(v * 100, 2) for k, v in normalized.items()}
 
-    if total > 0:
-        normalized = {k: v / total for k, v in npk_scores.items()}
-    else:
-        normalized = npk_scores
-
-    # =====================================================
-    # CONVERT TO PERCENTAGE (for farmers)
-    # =====================================================
-    percent = {
-        k.upper(): round(v * 100, 2) for k, v in normalized.items()
-    }
-
-    # =====================================================
-    # SMART AGRICULTURE DECISION LOGIC
-    # =====================================================
     values = normalized
     max_val = max(values.values()) if values else 0
     min_val = min(values.values()) if values else 0
 
-    primary = max(values, key=values.get).upper() if values else None
+    primary = max(values, key=lambda k: values[k]).upper() if total > 0 else "N"
+    low_nutrients = [k.upper() for k, v in values.items() if v < 0.3]
 
-    low_nutrients = [
-        k.upper() for k, v in values.items() if v < 0.3
-    ]
-
-    # =====================================================
-    # FINAL DECISION (AGRICULTURE-GRADE)
-    # =====================================================
     if len(valid_predictions) == 0:
         final_decision = {
             "status": "no_valid_leaf_detected",
             "message": "No valid plant leaf detected",
             "npk_levels": percent
         }
-
     elif max_val - min_val < 0.15:
         final_decision = {
             "status": "mixed_deficiency",
             "message": "Multiple nutrient imbalance detected",
             "npk_levels": percent
         }
-
     else:
         final_decision = {
             "status": f"{primary}_deficiency",
             "message": f"{primary} is the most deficient nutrient",
-
             "npk_levels": percent,
-
             "details": {
                 "primary_deficiency": {
                     "nutrient": primary,
                     "score": round(values[primary.lower()], 4),
                     "percentage": percent[primary]
                 },
-
                 "low_nutrients": [
-                    {
-                        "nutrient": n,
-                        "percentage": percent[n]
-                    }
-                    for n in low_nutrients
+                    {"nutrient": n, "percentage": percent[n]} for n in low_nutrients
                 ]
             }
         }
 
-    # =====================================================
-    # OVERALL CLASS (kept from your system)
-    # =====================================================
-    if valid_predictions:
-        overall = Counter(valid_predictions).most_common(1)[0][0]
-    else:
-        overall = "unknown"
+    overall = Counter(valid_predictions).most_common(1)[0][0] if valid_predictions else "unknown"
 
-    # =====================================================
-    # FINAL RESPONSE
-    # =====================================================
     return {
         "count": len(results),
-
-        # 🌱 main agriculture output
         "npk_distribution_percent": percent,
-
         "raw_scores": npk_scores,
-
         "valid_count": len(valid_predictions),
-
         "final_decision": final_decision,
-
         "overall_diagnosis": overall,
-
         "results": results
     }
 
-# @app.post("/predict")
-# async def predict(files: list[UploadFile] = File(...)):
-#     if not files:
-#         raise HTTPException(status_code=400, detail="Walay file nga nadawat.")
-
-#     results = []
-#     predictions = []
-
-#     for file in files:
-#         try:
-#             contents = await file.read()
-#             # Pwersahon nga RGB aron malikayan ang PNG alpha-channel error (4 channels)
-#             img = Image.open(io.BytesIO(contents)).convert("RGB")
-
-#             # Paggamit sa lock para sa dungan nga mga request (luwas sa memory crash)
-#             async with prediction_lock:
-#                 cls, conf, heatmap_data = predict_image(img)
-
-#             predictions.append(cls)
-
-#             results.append({
-#                 "filename": file.filename,
-#                 "cnn_class": cls,
-#                 "cnn_confidence": round(conf, 4),
-#                 "heatmap": heatmap_data  # Base64 string data URI
-#             })
-#         except Exception as e:
-#             results.append({
-#                 "filename": file.filename,
-#                 "error": f"Dili maproseso ang imahe: {str(e)}"
-#             })
-
-#     # Majority voting logic para sa kinatibuk-ang diagnosis
-#     valid_predictions = [p for p in predictions if p != "uncertain"]
-#     if valid_predictions:
-#         overall = Counter(valid_predictions).most_common(1)[0][0]
-#     elif predictions:
-#         overall = Counter(predictions).most_common(1)[0][0]
-#     else:
-#         overall = "unknown"
-
-#     return {
-#         "count": len(results),
-#         "overall_diagnosis": overall,
-#         "results": results
-#     }
-
-# =========================================================
-# SENSOR & WEBSOCKET PLACEHOLDERS
-# =========================================================
-
-# =========================================================
-# SENSOR & WEBSOCKET
-# =========================================================
-
 @app.get("/sensor")
 def sensor():
-    # Return sensor values together with recommendation
     return {"sensor": latest_sensor}
-
 
 @app.get("/recommendation")
 def recommendation():
-    """Return only the latest recommendation computed from sensor values."""
     return compute_recommendation(latest_sensor)
 
 @app.websocket("/ws")
@@ -634,18 +478,13 @@ async def ws(websocket: WebSocket):
     clients.add(websocket)
     try:
         while True:
-            # Send latest sensor data to client
             await websocket.send_json({"sensor": latest_sensor})
             await asyncio.sleep(1)
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"WebSocket execution exception tracking: {e}")
     finally:
         clients.discard(websocket)
 
-# =========================================================
-# RUN SERVER (UVICORN ENTRYPOINT)
-# =========================================================
 if __name__ == "__main__":
     import uvicorn
-    # Mahimo nimo usbon ang host/port base sa configuration sa imong network
     uvicorn.run("main:app", host="0.0.0.0", port=3000, reload=False)

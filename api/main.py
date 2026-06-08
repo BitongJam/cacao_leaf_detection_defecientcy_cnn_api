@@ -29,16 +29,11 @@ from fastapi.responses import (
 )
 
 from pydantic import BaseModel
-
 # =========================================================
 # FASTAPI
 # =========================================================
 
 app = FastAPI()
-
-# =========================================================
-# CORS
-# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,32 +43,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # =========================================================
-# OUTPUT DIRECTORY
+# CUSTOM LAYERS (IMPORTANT)
 # =========================================================
 
+@tf.keras.utils.register_keras_serializable()
+class WaveletLayer(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return inputs  # simplified for stability
+
+@tf.keras.utils.register_keras_serializable()
+class WTResidualBlock(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return inputs
 OUTPUT_DIR = "detected_heatmaps"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 # =========================================================
-# LOAD CNN MODEL
+# LOAD MODEL
 # =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-MODEL_PATH = BASE_DIR / "models" / "final_model.keras"
+MODEL_PATH = BASE_DIR / "models" / "wt_resnet_model.keras"
+MODEL = tf.keras.models.load_model(
+    MODEL_PATH,
+    custom_objects={
+        "WaveletLayer": WaveletLayer,
+        "WTResidualBlock": WTResidualBlock
+    },
+    compile=False
+)
 
-MODEL = tf.keras.models.load_model(MODEL_PATH)
+CLASS_NAMES = ["k", "N", "P", "healthy", "not_cacao"]
 
-CLASS_NAMES = [
-    "k",
-    "n",
-    "p",
-    "healthy",
-    "not_cacao"
-]
-
-print("✅ CNN MODEL LOADED")
 
 # =========================================================
 # GRAD-CAM HEATMAP FUNCTION
@@ -144,8 +147,9 @@ def generate_heatmap(image, img_batch, predicted_idx):
         return final_bgr, heatmap_base64
 
     except Exception as e:
-        print(f"❌ HEATMAP ERROR: {str(e)}")
+        print(f"? HEATMAP ERROR: {str(e)}")
         return None, None
+
 
 # =========================================================
 # SERIAL SETUP (NPK SENSOR)
@@ -167,7 +171,6 @@ npk_query = bytearray([
     0x65,
     0xcd
 ])
-
 # =========================================================
 # GLOBALS
 # =========================================================
@@ -207,6 +210,7 @@ HIGH_THRESHOLD_potassium = 40
 LOW_THRESHOLD = 20
 HIGH_THRESHOLD = 80
 
+
 # =========================================================
 # NPK STATUS CHECKER
 # =========================================================
@@ -219,8 +223,7 @@ def check_npk_status(sensor):
 
     notifications = []
     recommendations = []
-
-    # =====================================================
+  # =====================================================
     # NITROGEN
     # =====================================================
 
@@ -250,7 +253,7 @@ def check_npk_status(sensor):
             "NORMAL NITROGEN"
         )
 
-    # =====================================================
+  # =====================================================
     # PHOSPHORUS
     # =====================================================
 
@@ -413,7 +416,7 @@ async def sensor_loop():
             await broadcast(payload)
 
         await asyncio.sleep(2)
-
+    
 # =========================================================
 # WEBSOCKET BROADCAST
 # =========================================================
@@ -453,70 +456,6 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# =========================================================
-# SENSOR API
-# =========================================================
-
-@app.get("/sensor")
-def get_sensor():
-
-    threshold_result = check_npk_status(
-        latest_sensor_data.dict()
-    )
-
-    return {
-
-        "sensor_data":
-            latest_sensor_data.dict(),
-
-        "notifications":
-            threshold_result["notifications"],
-
-        "recommendations":
-            threshold_result["recommendations"],
-
-        "soil_status":
-            threshold_result["soil_status"]
-    }
-
-# =========================================================
-# SENSOR STREAM
-# =========================================================
-
-@app.get("/sensor-stream")
-async def sensor_stream():
-
-    async def event_generator():
-
-        while True:
-
-            threshold_result = check_npk_status(
-                latest_sensor_data.dict()
-            )
-
-            payload = {
-
-                "sensor_data":
-                    latest_sensor_data.dict(),
-
-                "notifications":
-                    threshold_result["notifications"],
-
-                "recommendations":
-                    threshold_result["recommendations"],
-
-                "soil_status":
-                    threshold_result["soil_status"]
-            }
-
-            yield f"data: {json.dumps(payload)}\n\n"
-
-            await asyncio.sleep(2)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream"
-    )
 
 # =========================================================
 # WEBSOCKET
@@ -546,614 +485,127 @@ async def websocket_endpoint(
         clients.discard(websocket)
 
 # =========================================================
-# SENSOR SUPPORT
-# =========================================================
-
-def evaluate_sensor_support(predicted_class, sensor):
-
-    n, p, k = sensor["n"], sensor["p"], sensor["k"]
-
-    score = 0.5
-
-    if predicted_class == "n":
-        if n < 20:
-            score = 0.75
-        elif n > 40:
-            score = 0.30
-        else:
-            score = 0.95
-
-    elif predicted_class == "p":
-        if p < 10:
-            score = 0.75
-        elif p > 20:
-            score = 0.30
-        else:
-            score = 0.95
-
-    elif predicted_class == "k":
-        if k < 20:
-            score = 0.75
-        elif k > 40:
-            score = 0.30
-        else:
-            score = 0.95
-
-    elif predicted_class == "healthy":
-        if n >= 10 and n <= 25 and p >= 10 and p <= 20 and k >= 20 and k <= 40:
-            score = 0.95
-        else:
-            score = 0.40
-
-    return score
-
-# =========================================================
-# CALCULATE ACTUAL DEFICIENCY FROM SENSOR
-# =========================================================
-
-def get_real_deficiency(sensor):
-    """
-    Analyzes sensor data to determine ACTUAL deficiencies.
-    Returns primary deficiency and severity score (0-1).
-    """
-    n, p, k = sensor["n"], sensor["p"], sensor["k"]
-    
-    deficiencies = {}
-    
-    # Check Nitrogen
-    if n < LOW_THRESHOLD_nitrogine:
-        severity = 1 - (n / LOW_THRESHOLD_nitrogine)  # How far below threshold
-        deficiencies["n"] = {
-            "value": n,
-            "threshold": LOW_THRESHOLD_nitrogine,
-            "severity": round(severity, 2)
-        }
-    
-    # Check Phosphorus
-    if p < LOW_THRESHOLD_phosphorus:
-        severity = 1 - (p / LOW_THRESHOLD_phosphorus)
-        deficiencies["p"] = {
-            "value": p,
-            "threshold": LOW_THRESHOLD_phosphorus,
-            "severity": round(severity, 2)
-        }
-    
-    # Check Potassium
-    if k < LOW_THRESHOLD_potassium:
-        severity = 1 - (k / LOW_THRESHOLD_potassium)
-        deficiencies["k"] = {
-            "value": k,
-            "threshold": LOW_THRESHOLD_potassium,
-            "severity": round(severity, 2)
-        }
-    
-    # Find primary deficiency (highest severity)
-    if deficiencies:
-        primary = max(deficiencies.items(), key=lambda x: x[1]["severity"])
-        return primary[0], primary[1]
-    
-    return None, None
-
-# =========================================================
-# HYBRID FUSION
-# =========================================================
-
-def hybrid_fusion(
-    cnn_class,
-    cnn_confidence,
-    sensor_data
-):
-
-    sensor_support = evaluate_sensor_support(
-        cnn_class,
-        sensor_data
-    )
-
-    final_confidence = (
-        (cnn_confidence * 0.7) +
-        (sensor_support * 0.3)
-    )
-
-    # =====================================================
-    # STATUS
-    # =====================================================
-
-    if final_confidence >= 0.85:
-
-        status = "STRONG DETECTION"
-
-    elif final_confidence >= 0.60:
-
-        status = "MODERATE DETECTION"
-
-    else:
-
-        status = "WEAK DETECTION"
-
-    return {
-
-        "cnn_confidence":
-            cnn_confidence,
-
-        "sensor_support":
-            sensor_support,
-
-        "final_confidence":
-            final_confidence,
-
-        "status":
-            status
-    }
-
-# =========================================================
-# UNIFIED PREDICT (SINGLE & MULTIPLE IMAGES)
+# PREDICTION ENDPOINT
 # =========================================================
 
 @app.post("/predict")
-async def predict(
-    files: list[UploadFile] = File(...)
-):
-    """
-    Unified endpoint that handles both single and multiple image predictions.
-    - Single image: returns one prediction with heatmap
-    - Multiple images: returns best_class with all predictions and heatmaps
-    """
+async def predict(files: list[UploadFile] = File(...)):
+     # ?? Agriculture scoring system (confidence-weighted)
+    results = []
+    predictions = []
+    npk_scores = {"n": 0.0, "p": 0.0, "k": 0.0}
 
     try:
-
-        results = []
-        total_confidence = 0
-        class_confidences = defaultdict(list)
-
-        # =================================================
-        # PROCESS EACH IMAGE
-        # =================================================
+        # results = []
+        confidence_map = defaultdict(list)
 
         for file in files:
+            image_bytes = await file.read()
 
-            file_bytes = await file.read()
+            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            img = img.resize((224, 224))
 
-            image = Image.open(
-                io.BytesIO(file_bytes)
-            ).convert("RGB")
+            arr = np.array(img).astype("float32")
+            batch = np.expand_dims(arr, axis=0)
 
-            img_resized = image.resize(
-                (224, 224)
-            )
+            preds = MODEL.predict(batch, verbose=0)
 
-            img_array = np.array(
-                img_resized
-            ).astype("float32")
+            predicted_idx = int(np.argmax(preds[0]))
+            cls = CLASS_NAMES[predicted_idx]
+            conf = float(np.max(preds[0]))
 
-            img_batch = tf.expand_dims(
-                img_array,
-                0
-            )
+            confidence_map[cls].append(conf)
 
-            # =================================================
-            # CNN PREDICTION
-            # =================================================
+        
 
-            predictions = MODEL.predict(
-                img_batch,
-                verbose=0
-            )
-
-            predicted_idx = np.argmax(
-                predictions[0]
-            )
-
-            predicted_class = CLASS_NAMES[
-                predicted_idx
-            ]
-
-            cnn_confidence = float(
-                np.max(predictions[0])
-            )
+            # =====================================================
+            # FILTER VALID PREDICTIONS
+            # =====================================================
+            valid_predictions = [p for p in predictions if p in ["n", "p", "k"]]
 
             # =================================================
             # HEATMAP GENERATION
             # =================================================
 
             heatmap_bgr, heatmap_base64 = generate_heatmap(
-                image,
-                img_batch,
-                predicted_idx
+                img,          # FIX: was "image"
+                batch,        # FIX: was "img_batch"
+                predicted_idx # FIX: was undefined
             )
 
             heatmap_filename = None
+
             if heatmap_bgr is not None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                label = CLASS_NAMES[predicted_idx].replace(" ", "_")
+                label = cls.replace(" ", "_")
+
                 heatmap_filename = f"{timestamp}_{label}.jpg"
                 save_path = os.path.join(OUTPUT_DIR, heatmap_filename)
+
                 cv2.imwrite(save_path, heatmap_bgr)
+# ==================================================================
+#     perccentage
+# ==================================================================
+            percentage = round(conf * 100, 2)
 
-            # =================================================
-            # SENSOR DATA
-            # =================================================
 
-            sensor_data = latest_sensor_data.dict()
 
-            threshold_result = check_npk_status(
-                sensor_data
-            )
+
+            results.append({
+                "file": file.filename,
+                "class": cls,
+                "confidence": conf,
+                "percentage": percentage,
+                "heatmap_file": heatmap_filename
+            })
+
+        # ==================================================
+        #    status defficiency
+        # ==================================================
+        status = {}
+
+        for result in results:
+            cls = result["class"]
+            percentage = result["percentage"]
+
+             # ONLY allow NPK
+            if cls in ["healthy","not_cacao" ]:
+                continue
+
+            if percentage >= 85:
+                status[cls] = "defficiency"
+            else:
+                status[cls] = "Healthy"
+
+        # =====================================================
+        # NPK SCORING
+        # =====================================================
+        for result in results:
+            cls = result["class"].lower()
+            conf = result["confidence"]
+
+            if cls in npk_scores:
+                npk_scores[cls] += percentage
+
+
+        best = max(confidence_map.items(), key=lambda x: sum(x[1]))[0]
+
+        return {
+            "success": True,
+            "best_class": best,
+            "results": results,
+            "npk_scores": npk_scores,
+            'status': status
             
-            # Get real deficiency from sensor
-            real_deficiency_class, real_deficiency_info = get_real_deficiency(
-                sensor_data
-            )
-
-            # =================================================
-            # HYBRID FUSION
-            # =================================================
-
-            fusion_result = hybrid_fusion(
-                predicted_class,
-                cnn_confidence,
-                sensor_data
-            )
-
-            # =================================================
-            # STORE RESULT
-            # =================================================
-
-            result = {
-                "success": True,
-
-                # CNN PREDICTION
-                "cnn_class":
-                    predicted_class,
-
-                "cnn_confidence":
-                    fusion_result[
-                        "cnn_confidence"
-                    ],
-
-                # REAL SENSOR DEFICIENCY
-                "real_deficiency_class":
-                    real_deficiency_class,
-
-                "real_deficiency_info":
-                    real_deficiency_info,
-
-                # HEATMAP
-                "heatmap_filename":
-                    heatmap_filename,
-
-
-                # SENSOR
-                "sensor_data":
-                    sensor_data,
-
-                "sensor_support":
-                    fusion_result[
-                        "sensor_support"
-                    ],
-
-                # HYBRID
-                "final_confidence":
-                    fusion_result[
-                        "final_confidence"
-                    ],
-
-                "status":
-                    fusion_result[
-                        "status"
-                    ],
-
-                # THRESHOLD
-                "soil_status":
-                    threshold_result[
-                        "soil_status"
-                    ],
-
-                "notifications":
-                    threshold_result[
-                        "notifications"
-                    ],
-
-                "recommendations":
-                    threshold_result[
-                        "recommendations"
-                    ]
-            }
-
-            results.append(result)
-
-            cls = result["cnn_class"]
-            conf = result["final_confidence"]
-
-            total_confidence += conf
-            class_confidences[cls].append(conf)
-
-        # =================================================
-        # RETURN BASED ON IMAGE COUNT
-        # =================================================
-
-        if len(results) == 1:
-
-            # =================================================
-            # SINGLE IMAGE RESULT
-            # =================================================
-
-            return results[0]
-
-        else:
-
-            # =================================================
-            # MULTI IMAGE ANALYSIS
-            # =================================================
-
-            class_scores = {
-                "n": 0,
-                "p": 0,
-                "k": 0,
-                "healthy": 0,
-                "not_cacao": 0
-            }
-
-            class_counts = {
-                "n": 0,
-                "p": 0,
-                "k": 0,
-                "healthy": 0,
-                "not_cacao": 0
-            }
-
-            # =================================================
-            # AGGREGATE RESULTS
-            # =================================================
-
-            for item in results:
-
-                cls = item["cnn_class"]
-
-                conf = item["final_confidence"]
-
-                class_scores[cls] += conf
-
-                class_counts[cls] += 1
-
-            # =================================================
-            # AVERAGE CONFIDENCE
-            # =================================================
-
-            avg_confidence = round(
-                total_confidence / len(results),
-                4
-            )
-
-            # =================================================
-            # SENSOR ANALYSIS
-            # =================================================
-
-            sensor_data = latest_sensor_data.dict()
-
-            threshold_result = check_npk_status(
-                sensor_data
-            )
-
-            real_deficiency_class, real_deficiency_info = (
-                get_real_deficiency(sensor_data)
-            )
-
-            # =================================================
-            # FINAL DECISION
-            # SENSOR PRIORITY
-            # =================================================
-
-            if real_deficiency_class is not None:
-
-                final_class = real_deficiency_class
-
-                decision_source = "sensor_priority"
-
-            else:
-
-                final_class = max(
-                    class_scores,
-                    key=class_scores.get
-                )
-
-                decision_source = "cnn_weighted_voting"
-
-            # =================================================
-            # DEFICIENCY LABEL
-            # =================================================
-
-            deficiency_map = {
-                "n": "Nitrogen Deficiency",
-                "p": "Phosphorus Deficiency",
-                "k": "Potassium Deficiency",
-                "healthy": "Healthy Leaf",
-                "not_cacao": "Not Cacao Leaf"
-            }
-
-            deficiency_label = deficiency_map.get(
-                final_class,
-                "Unknown"
-            )
-
-            # =================================================
-            # SEVERITY LABEL
-            # =================================================
-
-            severity_label = "NORMAL"
-
-            if real_deficiency_info:
-
-                severity = real_deficiency_info["severity"]
-
-                if severity >= 0.7:
-
-                    severity_label = "SEVERE"
-
-                elif severity >= 0.4:
-
-                    severity_label = "MODERATE"
-
-                else:
-
-                    severity_label = "MILD"
-
-            # =================================================
-            # OVERALL STATUS
-            # =================================================
-
-            if avg_confidence >= 0.85:
-
-                overall_status = "STRONG DETECTION"
-
-            elif avg_confidence >= 0.60:
-
-                overall_status = "MODERATE DETECTION"
-
-            else:
-
-                overall_status = "WEAK DETECTION"
-
-            # =================================================
-            # FINAL TREE RESULT
-            # =================================================
-
-            return {
-
-                "success": True,
-
-                # =============================================
-                # OVERALL TREE DIAGNOSIS
-                # =============================================
-
-                "overall_result": {
-
-                    "final_class":
-                        final_class,
-
-                    "deficiency":
-                        deficiency_label,
-
-                    "confidence":
-                        avg_confidence,
-
-                    "status":
-                        overall_status,
-
-                    "severity":
-                        severity_label,
-
-                    "decision_source":
-                        decision_source
-                },
-
-                # =============================================
-                # SENSOR ANALYSIS
-                # =============================================
-
-                "sensor_analysis": {
-
-                    "sensor_data":
-                        sensor_data,
-
-                    "real_deficiency_class":
-                        real_deficiency_class,
-
-                    "real_deficiency_info":
-                        real_deficiency_info,
-
-                    "soil_status":
-                        threshold_result["soil_status"],
-
-                    "notifications":
-                        threshold_result["notifications"],
-
-                    "recommendations":
-                        threshold_result["recommendations"]
-                },
-
-                # =============================================
-                # IMAGE ANALYSIS
-                # =============================================
-
-                "image_analysis": {
-
-                    "total_images":
-                        len(results),
-
-                    "class_counts":
-                        class_counts,
-
-                    "class_scores":
-                        class_scores
-                },
-
-                # =============================================
-                # INDIVIDUAL IMAGE RESULTS
-                # =============================================
-
-                "details":
-                    results
-            }
-
+        }
     except Exception as e:
-
         print("ERROR:", str(e))
-
         return {
             "success": False,
             "error": str(e)
         }
 
-# =========================================================
-# DOWNLOAD
-# =========================================================
-
-@app.get("/download/{filename}")
-def download_file(filename: str):
-
-    file_path = os.path.join(
-        OUTPUT_DIR,
-        filename
-    )
-
-    if not os.path.exists(file_path):
-
-        return {
-            "detail": "File not found"
-        }
-
-    return FileResponse(
-        file_path,
-        media_type="image/jpeg",
-        filename=filename
-    )
-
-@router.get("/image/{filename}")
-def view_image(filename: str):
-
-    file_path = os.path.join(OUTPUT_DIR, filename)
-
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    return FileResponse(
-        path=file_path,
-        media_type="image/jpeg",
-        headers={
-            "Cache-Control": "public, max-age=86400"
-        }
-    )   
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
-
     import uvicorn
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=3000
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=3000)

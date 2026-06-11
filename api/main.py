@@ -211,9 +211,9 @@ LOW_THRESHOLD = 20
 HIGH_THRESHOLD = 80
 
 
-# =========================================================
-# NPK STATUS CHECKER
-# =========================================================
+# =========================================================||
+#               NPK STATUS CHECKER                         ||
+# =========================================================||
 
 def check_npk_status(sensor):
 
@@ -493,6 +493,14 @@ async def predict(files: list[UploadFile] = File(...)):
      # ?? Agriculture scoring system (confidence-weighted)
     results = []
     predictions = []
+
+     # Store confidence percentages per deficiency class
+    npk_groups = {
+        "n": [],
+        "p": [],
+        "k": []
+    }
+
     npk_scores = {"n": 0.0, "p": 0.0, "k": 0.0}
 
     try:
@@ -514,18 +522,22 @@ async def predict(files: list[UploadFile] = File(...)):
             cls = CLASS_NAMES[predicted_idx]
             conf = float(np.max(preds[0]))
 
-            confidence_map[cls].append(conf)
+#==================================================================
+#     perccentage
+# ==================================================================
+            percentage = round(conf * 100, 2)
 
-        
+            confidence_map[cls].append(percentage)
+#===================================================================
+#               GROUP N/P/K PERCENTAGES
+#===================================================================
 
-            # =====================================================
-            # FILTER VALID PREDICTIONS
-            # =====================================================
-            valid_predictions = [p for p in predictions if p in ["n", "p", "k"]]
-
-            # =================================================
-            # HEATMAP GENERATION
-            # =================================================
+            if cls.lower() in npk_groups:
+                npk_groups[cls.lower()].append(percentage)
+    
+# ==================================================================
+#                   HEATMAP GENERATION
+# ==================================================================
 
             heatmap_bgr, heatmap_base64 = generate_heatmap(
                 img,          # FIX: was "image"
@@ -543,10 +555,7 @@ async def predict(files: list[UploadFile] = File(...)):
                 save_path = os.path.join(OUTPUT_DIR, heatmap_filename)
 
                 cv2.imwrite(save_path, heatmap_bgr)
-# ==================================================================
-#     perccentage
-# ==================================================================
-            percentage = round(conf * 100, 2)
+
 
 
 
@@ -558,37 +567,60 @@ async def predict(files: list[UploadFile] = File(...)):
                 "percentage": percentage,
                 "heatmap_file": heatmap_filename
             })
-
-        # ==================================================
-        #    status defficiency
-        # ==================================================
+# ==================================================
+#                status defficiency
+# ==================================================
         status = {}
 
-        for result in results:
-            cls = result["class"]
-            percentage = result["percentage"]
+        if not results:
+            status["overall"] = "Healthy"
+        else:
+            has_issue = False
 
-             # ONLY allow NPK
-            if cls in ["healthy","not_cacao" ]:
-                continue
+            for r in results:
+                cls = r["class"]
+                pct = r["percentage"]
 
-            if percentage >= 85:
-                status[cls] = "defficiency"
+                if cls not in ["healthy", "not_cacao"]:
+                    has_issue = True
+
+                    status[cls] = (
+                        "Deficiency" if pct >= 85 else "Healthy"
+                    )
+
+            if not has_issue:
+                status["overall"] = "Healthy"
+
+        # =====================================================
+        #       compute mean value per NPK
+        # =====================================================
+        npk_scores = {}
+        for nutirents, value in npk_groups.items():
+            if value:
+                npk_scores[nutirents] = round(
+                    sum(value) / len(value), 2
+                )
             else:
-                status[cls] = "Healthy"
+                npk_scores[nutirents] = 0.0
+#====================================================
+#                BEST CLASS
+#====================================================
 
-        # =====================================================
-        # NPK SCORING
-        # =====================================================
-        for result in results:
-            cls = result["class"].lower()
-            conf = result["confidence"]
+            if confidence_map:
 
-            if cls in npk_scores:
-                npk_scores[cls] += percentage
+                best = max(
+                    confidence_map.items(),
+                    key=lambda x: sum(x[1])
+                )[0]
 
+            else:
 
-        best = max(confidence_map.items(), key=lambda x: sum(x[1]))[0]
+                best = "healthy"
+        
+
+          
+
+        # best = max(confidence_map.items(), key=lambda x: sum(x[1]))[0]
 
         return {
             "success": True,

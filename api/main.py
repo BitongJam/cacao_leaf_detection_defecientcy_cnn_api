@@ -564,32 +564,8 @@ async def predict(files: list[UploadFile] = File(...)):
                 "file": file.filename,
                 "class": cls,
                 "confidence": conf,
-                "percentage": percentage,
                 "heatmap_file": heatmap_filename
             })
-# ==================================================
-#                status defficiency
-# ==================================================
-        status = {}
-
-        if not results:
-            status["overall"] = "Healthy"
-        else:
-            has_issue = False
-
-            for r in results:
-                cls = r["class"]
-                pct = r["percentage"]
-
-                if cls not in ["healthy", "not_cacao"]:
-                    has_issue = True
-
-                    status[cls] = (
-                        "Deficiency" if pct >= 85 else "Healthy"
-                    )
-
-            if not has_issue:
-                status["overall"] = "Healthy"
 
         # =====================================================
         #       compute mean value per NPK
@@ -598,10 +574,29 @@ async def predict(files: list[UploadFile] = File(...)):
         for nutirents, value in npk_groups.items():
             if value:
                 npk_scores[nutirents] = round(
-                    sum(value) / len(value), 2
+                    sum(value) /len(files)
                 )
             else:
                 npk_scores[nutirents] = 0.0
+
+# ==================================================
+#                status defficiency
+# ==================================================
+
+
+        status = {}
+
+        NPK_DEFICIENCY_THRESHOLD = 50
+
+        for nutrient, score in npk_scores.items():
+
+            if score >= NPK_DEFICIENCY_THRESHOLD:
+
+                status[nutrient] = "Deficiency"
+
+            else:
+
+                status[nutrient] = "Healthy"
 #====================================================
 #                BEST CLASS
 #====================================================

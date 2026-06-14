@@ -2,6 +2,7 @@
 env/
 venv/
 env_lib-env/
+detected_heatmaps/
 
 # Compiled Python files
 __pycache__/

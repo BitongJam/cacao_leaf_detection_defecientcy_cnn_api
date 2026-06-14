@@ -551,8 +551,8 @@ async def predict(files: list[UploadFile] = File(...)):
             if heatmap_bgr is not None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 label = cls.replace(" ", "_")
-
-                heatmap_filename = f"{timestamp}_{label}.jpg"
+                file_name = file.filename.rsplit(".", 1)[0]
+                heatmap_filename = f"{timestamp}_{label}_{file_name}.jpg"
                 save_path = os.path.join(OUTPUT_DIR, heatmap_filename)
 
                 cv2.imwrite(save_path, heatmap_bgr)

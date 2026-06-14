@@ -632,6 +632,41 @@ async def predict(files: list[UploadFile] = File(...)):
             "error": str(e)
         }
 
+@app.get("/download/{filename}")
+def download_file(filename: str):
+
+    file_path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
+
+    if not os.path.exists(file_path):
+
+        return {
+            "detail": "File not found"
+        }
+
+    return FileResponse(
+        file_path,
+        media_type="image/jpeg",
+        filename=filename
+    )
+
+@app.get("/image/{filename}")
+def view_image(filename: str):
+
+    file_path = os.path.join(OUTPUT_DIR, filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(
+        path=file_path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "public, max-age=86400"
+        }
+    )   
 
 if __name__ == "__main__":
     import uvicorn

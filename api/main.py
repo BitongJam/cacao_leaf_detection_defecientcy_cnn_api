@@ -11,6 +11,7 @@ import tensorflow as tf
 from PIL import Image
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, WebSocket, HTTPException

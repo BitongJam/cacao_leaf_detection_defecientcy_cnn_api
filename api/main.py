@@ -392,7 +392,8 @@ async def predict(files: list[UploadFile] = File(...)):
             if heatmap_bgr is not None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 label = predicted_class.replace(" ", "_")
-                heatmap_filename = f"{timestamp}_{label}.jpg"
+                file_name = file.filename.rsplit(".", 1)[0]
+                heatmap_filename = f"{timestamp}_{label}_{file_name}.jpg"
                 cv2.imwrite(os.path.join(OUTPUT_DIR, heatmap_filename), heatmap_bgr)
 
             fusion_result = hybrid_fusion(predicted_class, cnn_confidence, sensor_data)

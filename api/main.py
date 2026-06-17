@@ -488,6 +488,7 @@ async def predict(files: list[UploadFile] = File(...)):
         overall_status = "STRONG DETECTION" if avg_confidence >= 0.85 else ("MODERATE DETECTION" if avg_confidence >= 0.60 else "WEAK DETECTION")
 
         return {
+
             "success": True,
             "overall_result": {
                 "final_class": final_class,
@@ -514,9 +515,68 @@ async def predict(files: list[UploadFile] = File(...)):
         }
 
     except Exception as e:
+
         print("ERROR:", str(e))
         return {"success": False, "error": str(e)}
 
+
+# =========================================================
+# MULTI PREDICT
+# =========================================================
+
+@app.post("/multi-predict")
+async def multi_predict(
+    files: list[UploadFile] = File(...)
+):
+
+    results = []
+
+    total_confidence = 0
+
+    class_confidences = defaultdict(
+        list
+    )
+
+    for file in files:
+
+        result = await predict(file)
+
+        results.append(result)
+
+        cls = result["cnn_class"]
+
+        conf = result["final_confidence"]
+
+        total_confidence += conf
+
+        class_confidences[cls].append(conf)
+
+    avg_confidence = (
+        total_confidence / len(results)
+    )
+
+    best_class = max(
+        class_confidences.items(),
+        key=lambda x: (
+            sum(x[1]) / len(x[1])
+        )
+    )[0]
+
+    return {
+
+        "best_class":
+            best_class,
+
+        "avg_confidence":
+            avg_confidence,
+
+        "details":
+            results
+    }
+
+# =========================================================
+# DOWNLOAD
+# =========================================================
 
 @app.get("/download/{filename}")
 def download_file(filename: str):
@@ -535,5 +595,6 @@ def view_image(filename: str):
 
 
 if __name__ == "__main__":
+
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=3000)

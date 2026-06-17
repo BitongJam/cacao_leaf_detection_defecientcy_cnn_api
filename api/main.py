@@ -69,14 +69,14 @@ async def lifespan(app: FastAPI):
     base_dir = Path(__file__).resolve().parent.parent
     model_path = base_dir / "models" / "final_model.keras"
     MODEL = tf.keras.models.load_model(model_path)
-    print("âœ… CNN MODEL LOADED")
+    print("✅ CNN MODEL LOADED")
 
     # Open Serial Port
     try:
         ser = serial.Serial('/dev/serial0', baudrate=9600, timeout=1)
-        print("âœ… SERIAL PORT OPENED")
+        print("✅ SERIAL PORT OPENED")
     except Exception as e:
-        print(f"âŒ SERIAL PORT ERROR: {e}")
+        print(f"❌ SERIAL PORT ERROR: {e}")
 
     # Start Background Sensor Task
     task = asyncio.create_task(sensor_loop())
@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
     if ser and ser.is_open:
         ser.close()
-        print("ðŸ”’ SERIAL PORT CLOSED")
+        print("🔒 SERIAL PORT CLOSED")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -105,9 +105,6 @@ app.add_middleware(
 
 def generate_heatmap(image, img_batch, predicted_idx):
     """Generates Grad-CAM heatmap for the prediction."""
-    if MODEL is None:
-        raise RuntimeError("MODEL is not loaded")
-
     try:
         try:
             target_layer = MODEL.get_layer("last_conv_layer")
@@ -145,7 +142,7 @@ def generate_heatmap(image, img_batch, predicted_idx):
 
         return final_bgr, heatmap_base64
     except Exception as e:
-        print(f"âŒ HEATMAP ERROR: {str(e)}")
+        print(f"❌ HEATMAP ERROR: {str(e)}")
         return None, None
 
 
@@ -160,7 +157,7 @@ def check_npk_status(sensor):
         recommendations.append("Apply Nitrogen fertilizer")
     elif n > HIGH_THRESHOLD_NITROGEN:
         notifications.append("HIGH NITROGEN")
-        recommendations.append("Reduce Nitrogen fertilizer")
+        recommendations.append("Reduce Nitrogen fertilizer application")
     else:
         notifications.append("NORMAL NITROGEN")
 
@@ -233,7 +230,7 @@ def evaluate_sensor_support(predicted_class, sensor):
     return 0.50
 
 
-def hybrid_fusion(cnn_class, *, sensor_data):
+def hybrid_fusion(cnn_class, cnn_confidence, sensor_data):
     """Combines CNN confidence and Sensor support."""
     sensor_support = evaluate_sensor_support(cnn_class, sensor_data)
     final_confidence = (cnn_confidence * 0.7) + (sensor_support * 0.3)
@@ -291,7 +288,7 @@ async def sensor_loop():
             threshold_result = check_npk_status(data)
             
             payload = {
-                "sensor_data": latest_sensor_data.dict(),
+                "sensor_data": latest_sensor_data.model_dump(),
                 "notifications": threshold_result["notifications"],
                 "recommendations": threshold_result["recommendations"],
                 "soil_status": threshold_result["soil_status"]
@@ -319,7 +316,7 @@ async def broadcast(data):
 
 @app.get("/sensor")
 def get_sensor():
-    sensor_dict = latest_sensor_data.dict()
+    sensor_dict = latest_sensor_data.model_dump()
     threshold_result = check_npk_status(sensor_dict)
     return {
         "sensor_data": sensor_dict,
@@ -333,7 +330,7 @@ def get_sensor():
 async def sensor_stream():
     async def event_generator():
         while True:
-            sensor_dict = latest_sensor_data.dict()
+            sensor_dict = latest_sensor_data.model_dump()
             threshold_result = check_npk_status(sensor_dict)
             payload = {
                 "sensor_data": sensor_dict,
@@ -363,12 +360,10 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.post("/predict")
 async def predict(files: list[UploadFile] = File(...)):
     try:
-        if MODEL is None:
-            raise HTTPException(status_code=503, detail="Model not loaded")
         results = []
         total_confidence = 0
         class_confidences = defaultdict(list)
-        sensor_data = latest_sensor_data.dict()
+        sensor_data = latest_sensor_data.model_dump()
         threshold_result = check_npk_status(sensor_data)
         real_deficiency_class, real_deficiency_info = get_real_deficiency(sensor_data)
 
@@ -436,8 +431,8 @@ async def predict(files: list[UploadFile] = File(...)):
                 "overall_result": {
                     "final_class": "not_cacao",
                     "deficiency": DEFICIENCY_MAP.get("not_cacao"),
-                    "confidence": not_cacao_result["final_confidence"] if not_cacao_result is not None and len(results) == 1 else round(total_confidence / len(results), 4),
-                    "status": "STRONG DETECTION" if not_cacao_result is not None and not_cacao_result["final_confidence"] >= 0.85 else "MODERATE DETECTION",
+                    "confidence": not_cacao_result["final_confidence"] if len(results) == 1 else round(total_confidence / len(results), 4),
+                    "status": "STRONG DETECTION" if not_cacao_result["final_confidence"] >= 0.85 else "MODERATE DETECTION",
                     "severity": "NORMAL",
                     "decision_source": "strict_not_cacao_filter"
                 },
@@ -520,7 +515,7 @@ async def predict(files: list[UploadFile] = File(...)):
 
 @app.get("/download/{filename}")
 def download_file(filename: str):
-    file_path = os.path.join(OUTPUT_DIR,    `d` filename)
+    file_path = os.path.join(OUTPUT_DIR, filename)
     if not os.path.exists(file_path):
         return {"detail": "File not found"}
     return FileResponse(file_path, media_type="image/jpeg", filename=filename)
@@ -536,4 +531,4 @@ def view_image(filename: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3000)1git s
+    uvicorn.run(app, host="0.0.0.0", port=3000)
